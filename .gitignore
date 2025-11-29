@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Large datasets
+data/
+data_deforming_plate/
+data_deforming_plate_colab/
+*.tfrecord
+*.pkl
+*.npy
+*.zip
+
+# Checkpoints / models / logs
+checkpoints/
+rollouts/
+egnn-pytorch/checkpoints/
+egnn-pytorch/test_results/
+*.pt
+*.pbtxt
+events.out.tfevents.*
+
+# Archives
+egnn_code.zip
+deforming_plate_colab.zip
+
+# Assets (optional)
+assets/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/

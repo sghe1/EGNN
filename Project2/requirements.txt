@@ -1,0 +1,20 @@
+# -------- TensorFlow (Apple Silicon) --------
+tensorflow-macos==2.13.1
+tensorflow-metal==1.1.0
+
+# -------- TF dependencies (STRICT VERSIONS) --------
+keras>=2.13,<2.14
+numpy>=1.22,<1.25
+protobuf>=3.20.3,<4.21.0
+tensorboard>=2.13,<2.14
+typing_extensions<4.6
+
+# -------- TFRecord reading --------
+tfrecord==1.14.1
+
+# -------- Utilities --------
+six>=1.15.0
+h5py>=3.1.0,<4.0.0
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
