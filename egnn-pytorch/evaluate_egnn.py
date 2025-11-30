@@ -134,12 +134,14 @@ def evaluate_model(model, dataloader, device, save_dir, num_trajectories=None):
     print(f"\nSaving predictions to {save_dir}...")
     
     # Save as numpy arrays
-    np.save(os.path.join(save_dir, 'predictions_velocity.npy'), all_pred_vel)
-    np.save(os.path.join(save_dir, 'predictions_stress.npy'), all_pred_stress)
-    np.save(os.path.join(save_dir, 'predictions_positions.npy'), all_pred_pos)
-    np.save(os.path.join(save_dir, 'true_velocity.npy'), all_true_vel)
-    np.save(os.path.join(save_dir, 'true_stress.npy'), all_true_stress)
-    np.save(os.path.join(save_dir, 'true_positions.npy'), all_true_pos)
+    # Save as lists of arrays (allow_pickle=True allows saving lists with different shapes)
+    # Different trajectories may have different numbers of nodes (N)
+    np.save(os.path.join(save_dir, 'predictions_velocity.npy'), np.array(all_pred_vel, dtype=object), allow_pickle=True)
+    np.save(os.path.join(save_dir, 'predictions_stress.npy'), np.array(all_pred_stress, dtype=object), allow_pickle=True)
+    np.save(os.path.join(save_dir, 'predictions_positions.npy'), np.array(all_pred_pos, dtype=object), allow_pickle=True)
+    np.save(os.path.join(save_dir, 'true_velocity.npy'), np.array(all_true_vel, dtype=object), allow_pickle=True)
+    np.save(os.path.join(save_dir, 'true_stress.npy'), np.array(all_true_stress, dtype=object), allow_pickle=True)
+    np.save(os.path.join(save_dir, 'true_positions.npy'), np.array(all_true_pos, dtype=object), allow_pickle=True)
     
     # Compute and save metrics
     metrics = compute_metrics(all_pred_vel, all_pred_stress, all_true_vel, all_true_stress)

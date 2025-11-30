@@ -387,15 +387,18 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
             all_true_pos.append(traj_true_pos)
     
     # Save as numpy arrays
+    # Note: Different trajectories may have different numbers of nodes (N),
+    # so we save as a list of arrays rather than trying to stack into a single array
     epoch_dir = os.path.join(save_dir, f'epoch_{epoch+1}')
     os.makedirs(epoch_dir, exist_ok=True)
     
-    np.save(os.path.join(epoch_dir, 'predictions_velocity.npy'), all_pred_vel)
-    np.save(os.path.join(epoch_dir, 'predictions_stress.npy'), all_pred_stress)
-    np.save(os.path.join(epoch_dir, 'predictions_positions.npy'), all_pred_pos)
-    np.save(os.path.join(epoch_dir, 'true_velocity.npy'), all_true_vel)
-    np.save(os.path.join(epoch_dir, 'true_stress.npy'), all_true_stress)
-    np.save(os.path.join(epoch_dir, 'true_positions.npy'), all_true_pos)
+    # Save as lists of arrays (allow_pickle=True allows saving lists with different shapes)
+    np.save(os.path.join(epoch_dir, 'predictions_velocity.npy'), np.array(all_pred_vel, dtype=object), allow_pickle=True)
+    np.save(os.path.join(epoch_dir, 'predictions_stress.npy'), np.array(all_pred_stress, dtype=object), allow_pickle=True)
+    np.save(os.path.join(epoch_dir, 'predictions_positions.npy'), np.array(all_pred_pos, dtype=object), allow_pickle=True)
+    np.save(os.path.join(epoch_dir, 'true_velocity.npy'), np.array(all_true_vel, dtype=object), allow_pickle=True)
+    np.save(os.path.join(epoch_dir, 'true_stress.npy'), np.array(all_true_stress, dtype=object), allow_pickle=True)
+    np.save(os.path.join(epoch_dir, 'true_positions.npy'), np.array(all_true_pos, dtype=object), allow_pickle=True)
     
     print(f"  -> Saved predictions to {epoch_dir}")
     
@@ -459,11 +462,30 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
             #   pred_coors = coors_prev + pred_vel
             pred_vel, pred_stress, pred_coors = model(feats_prev, coors_prev, adj_mat_t)
             
+            # Extract node_type from features (first dimension, index 0)
+            # node_type is stored as float in features: [node_type(1), vel(3), acc(3), stress(1)]
+            # node_type values: typically 0=boundary, 1=normal, 2=inflow, 3=outflow, etc.
+            node_type = feats_prev[:, :, 0]  # (B, N)
+            # Create mask for node_type == 1 (normal nodes only)
+            # Loss is computed only on normal nodes, excluding boundary and special nodes
+            node_mask = (node_type == 1.0).float()  # (B, N)
+            
             # Compute losses with weighting (apply velocity scaling)
+            # Only compute loss on nodes where node_type == 1
             scaled_pred_vel = pred_vel * VELOCITY_SCALE
             scaled_target_vel = target_vel_t * VELOCITY_SCALE
-            loss_vel = F.mse_loss(scaled_pred_vel, scaled_target_vel)
-            loss_stress = F.mse_loss(pred_stress, target_stress_t)
+            
+            # Velocity loss: compute per-node, then mask and average
+            vel_error = (scaled_pred_vel - scaled_target_vel) ** 2  # (B, N, 3)
+            vel_error_per_node = torch.sum(vel_error, dim=-1)  # (B, N)
+            vel_error_masked = vel_error_per_node * node_mask  # (B, N)
+            loss_vel = vel_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
+            
+            # Stress loss: compute per-node, then mask and average
+            stress_error = (pred_stress.squeeze(-1) - target_stress_t.squeeze(-1)) ** 2  # (B, N)
+            stress_error_masked = stress_error * node_mask  # (B, N)
+            loss_stress = stress_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
+            
             # Weight velocity loss to balance with stress loss
             loss = velocity_loss_weight * loss_vel + loss_stress
             

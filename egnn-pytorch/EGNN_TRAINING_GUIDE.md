@@ -22,9 +22,9 @@ The EGNN model is trained to predict **velocity** (3D) and **stress** (1D) for e
 - Adjacency matrix (graph structure)
 
 And outputs:
-- **Predicted velocity (3D)**: Computed using the formula `v_i^{l+1} = phi_v(h_i^l) * v_i^{init} + C * sum_{j != i} (x_i^l - x_j^l) * phi_x(m_ij)`
+- **Predicted velocity (3D)**: Computed using the formula $v_i^{l+1} = \phi_v(h_i^l) * v_i^{init} + C * \sum_{j \neq i} (x_i^l - x_j^l) * \phi_x(m_{ij})$
 - **Predicted stress (1D)**: Directly predicted by a dedicated head from node embeddings
-- **Updated positions (3D)**: Computed as `x_i^{l+1} = x_i^l + v_i^{l+1}` from predicted velocity
+- **Updated positions (3D)**: Computed as $x_i^{l+1} = x_i^l + v_i^{l+1}$ from predicted velocity
 
 **Note**: The velocity prediction follows the EGNN paper formula (arXiv:2102.09844v3), combining initial velocity modulation with neighbor interactions. Coordinates are updated from the predicted velocity, not from EGNN's internal coordinate updates.
 
@@ -91,9 +91,9 @@ The model follows the EGNN paper (arXiv:2102.09844v3) formulas for velocity and 
 
 1. **Input MLP**: Linear layer mapping 8D features → hidden dimension (128)
 2. **EGNN Network**: 4 layers of E(n) Equivariant Graph Neural Network (updates node embeddings `h`)
-3. **Message computation MLP (φ_e)**: Computes messages `m_ij = phi_e(h_i, h_j, ||x_i - x_j||^2)`
-4. **Velocity modulation MLP (φ_v)**: Outputs scalar `gamma = phi_v(h_i)` to modulate initial velocity
-5. **Neighbor interaction MLP (φ_x)**: Outputs scalar weight `phi_x(m_ij)` for neighbor contributions
+3. **Message computation MLP ($\phi_e$)**: Computes messages $m_ij = \phi_e(h_i, h_j, ||x_i - x_j||^2)$
+4. **Velocity modulation MLP ($\phi_v$)**: Outputs scalar $\gamma = \phi_v(h_i)$ to modulate initial velocity
+5. **Neighbor interaction MLP ($\phi_x$)**: Outputs scalar weight $\phi_x(m_{ij})$ for neighbor contributions
 6. **Stress head**: Linear layer mapping embeddings → 1D stress at each node
 
 **Model Parameters**: ~933,208 parameters
@@ -103,17 +103,17 @@ The model follows the EGNN paper (arXiv:2102.09844v3) formulas for velocity and 
 The model's forward pass follows the EGNN paper formulas:
 
 1. **Input**: Node features `feats` (B, N, 8), coordinates `coors` (B, N, 3), adjacency `adj_mat` (N, N)
-2. **Extract initial velocity**: `v_i^{init}` from features (indices 1:4)
+2. **Extract initial velocity**: $v_i^{init}$ from features (indices 1:4)
 3. **Input MLP**: Projects features to hidden dimension → `h` (B, N, 128)
 4. **EGNN layers**: Updates node embeddings:
    - `h, _ = egnn(h, coors, adj_mat)`
    - `h` contains learned node embeddings (we ignore EGNN's internal coordinate updates)
 5. **Message computation**:
-   - `m_ij = phi_e(h_i, h_j, ||x_i - x_j||^2)` for all pairs
+   - $m_{ij} = \phi_e(h_i, h_j, ||x_i - x_j||^2)$ for all pairs
 6. **Velocity prediction** (following paper formula):
-   - `gamma = phi_v(h_i)` → scalar gate (B, N, 1)
-   - `neighbor_term = sum_{j != i} (x_i - x_j) * phi_x(m_ij)` → (B, N, 3)
-   - `pred_vel = gamma * v_i^{init} + C * neighbor_term` → (B, N, 3)
+   - $\gamma = \phi_v(h_i)$ → scalar gate (B, N, 1)
+   - $neighbor \ term = \sum_{j \neq i} (x_i - x_j) * \phi_x(m_{ij})$ → (B, N, 3)
+   - $pred \ vel = \gamma * v_i^{init} + C * neighbor \ term$ → (B, N, 3)
 7. **Stress prediction**:
    - `pred_stress = stress_head(h)` → (B, N, 1)
 8. **Coordinate prediction** (following paper formula):
@@ -121,9 +121,9 @@ The model's forward pass follows the EGNN paper formulas:
 9. **Return**: `(pred_vel, pred_stress, pred_coors)`
 
 **Key formulas** (from EGNN paper):
-- **Velocity**: `v_i^{l+1} = phi_v(h_i^l) * v_i^{init} + C * sum_{j != i} (x_i^l - x_j^l) * phi_x(m_ij)`
-- **Coordinates**: `x_i^{l+1} = x_i^l + v_i^{l+1}`
-- **Messages**: `m_ij = phi_e(h_i^l, h_j^l, ||x_i^l - x_j^l||^2)`
+- **Velocity**: $v_i^{l+1} = \phi_v(h_i^l) * v_i^{init} + C * \sum_{j \neq i} (x_i^l - x_j^l) * \phi_x(m_ij)$
+- **Coordinates**: $x_i^{l+1} = x_i^l + v_i^{l+1}$
+- **Messages**: $m_{ij} = \phi_e(h_i^l, h_j^l, ||x_i^l - x_j^l||^2)$
 
 ### Key Features
 
@@ -244,9 +244,9 @@ This generates:
 ### 1. Velocity Prediction Following EGNN Paper Formulas
 
 **Design**: The model implements the velocity prediction formula from the EGNN paper (arXiv:2102.09844v3):
-- **φ_v MLP**: `nn.Sequential` outputting scalar `gamma = phi_v(h_i)` to modulate initial velocity
-- **φ_e MLP**: `nn.Sequential` computing messages `m_ij = phi_e(h_i, h_j, ||x_i - x_j||^2)`
-- **φ_x MLP**: `nn.Sequential` outputting scalar weight `phi_x(m_ij)` for neighbor interactions
+- **$\phi_v$ MLP**: `nn.Sequential` outputting scalar `gamma = phi_v(h_i)` to modulate initial velocity
+- **$\phi_e$ MLP**: `nn.Sequential` computing messages `m_ij = phi_e(h_i, h_j, ||x_i - x_j||^2)`
+- **$\phi_x$ MLP**: `nn.Sequential` outputting scalar weight `phi_x(m_ij)` for neighbor interactions
 - **Velocity formula**: `v_i^{l+1} = gamma * v_i^{init} + C * sum_{j != i} (x_i - x_j) * phi_x(m_ij)`
 - **Coordinate formula**: `x_i^{l+1} = x_i^l + v_i^{l+1}`
 
