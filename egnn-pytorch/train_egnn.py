@@ -7,6 +7,7 @@ Uses data_loader_egnn.py to load data and MeshEGNN model.
 import os
 import sys
 import json
+import pickle
 import argparse
 import torch
 import torch.nn as nn
@@ -78,14 +79,17 @@ except ImportError:
             )
 
             # φ_x: takes m_ij and outputs a scalar weight (Eq. (7))
+            # Add tanh to constrain output to [-1, 1] to prevent explosion
             self.phi_x = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, 1)
-)
+                nn.Linear(hidden_dim, 1),
+                nn.Tanh()  # Constrain to [-1, 1] to prevent large neighbor terms
+            )
             
-            # Constant C (can be learnable)
-            self.C = nn.Parameter(torch.tensor(C, dtype=torch.float32))
+            # Constant C (can be learnable) - initialize to small value to match velocity scale
+            # Velocities are ~1e-4, so C should be small (e.g., 1e-4 or 1e-5)
+            self.C = nn.Parameter(torch.tensor(C * 1e-4, dtype=torch.float32))  # Scale down C
             
             # Stress head (unchanged)
             self.stress_head = nn.Linear(hidden_dim, 1)
@@ -153,8 +157,15 @@ except ImportError:
             phi_x_masked = phi_x_output.unsqueeze(-1) * adj_mask.unsqueeze(-1)  # (B, N, N, 1)
             neighbor_term = torch.sum(rel_pos * phi_x_masked, dim=2)  # (B, N, 3)
             
+            # Normalize neighbor_term by number of neighbors to prevent explosion
+            # Count neighbors per node
+            num_neighbors = adj_mask.sum(dim=2, keepdim=True)  # (B, N, 1)
+            num_neighbors = torch.clamp(num_neighbors, min=1.0)  # Avoid division by zero
+            neighbor_term = neighbor_term / num_neighbors  # Normalize by neighbor count
+            
             # Compute scalar gate φ_v(h_i^l) (γ_i in Eq. (7))
-            gamma = self.phi_v(h)               # (B, N, 1)
+            # Add sigmoid to constrain gamma to [0, 1] to prevent velocity explosion
+            gamma = torch.sigmoid(self.phi_v(h))  # (B, N, 1) - now in [0, 1]
 
             # Velocity prediction (Eq. (7)):
             # v_i^{l+1} = φ_v(h_i^l) v_i^{init} + C ∑_{j≠i} (x_i^l - x_j^l) φ_x(m_ij)
@@ -392,20 +403,27 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
     epoch_dir = os.path.join(save_dir, f'epoch_{epoch+1}')
     os.makedirs(epoch_dir, exist_ok=True)
     
-    # Save as lists of arrays (allow_pickle=True allows saving lists with different shapes)
-    np.save(os.path.join(epoch_dir, 'predictions_velocity.npy'), np.array(all_pred_vel, dtype=object), allow_pickle=True)
-    np.save(os.path.join(epoch_dir, 'predictions_stress.npy'), np.array(all_pred_stress, dtype=object), allow_pickle=True)
-    np.save(os.path.join(epoch_dir, 'predictions_positions.npy'), np.array(all_pred_pos, dtype=object), allow_pickle=True)
-    np.save(os.path.join(epoch_dir, 'true_velocity.npy'), np.array(all_true_vel, dtype=object), allow_pickle=True)
-    np.save(os.path.join(epoch_dir, 'true_stress.npy'), np.array(all_true_stress, dtype=object), allow_pickle=True)
-    np.save(os.path.join(epoch_dir, 'true_positions.npy'), np.array(all_true_pos, dtype=object), allow_pickle=True)
+    # Save as lists of arrays using pickle (handles variable shapes across trajectories)
+    # Use pickle directly to avoid numpy's array conversion issues
+    with open(os.path.join(epoch_dir, 'predictions_velocity.npy'), 'wb') as f:
+        pickle.dump(all_pred_vel, f)
+    with open(os.path.join(epoch_dir, 'predictions_stress.npy'), 'wb') as f:
+        pickle.dump(all_pred_stress, f)
+    with open(os.path.join(epoch_dir, 'predictions_positions.npy'), 'wb') as f:
+        pickle.dump(all_pred_pos, f)
+    with open(os.path.join(epoch_dir, 'true_velocity.npy'), 'wb') as f:
+        pickle.dump(all_true_vel, f)
+    with open(os.path.join(epoch_dir, 'true_stress.npy'), 'wb') as f:
+        pickle.dump(all_true_stress, f)
+    with open(os.path.join(epoch_dir, 'true_positions.npy'), 'wb') as f:
+        pickle.dump(all_true_pos, f)
     
     print(f"  -> Saved predictions to {epoch_dir}")
     
     model.train()  # Set back to training mode
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weight=1000.0):
+def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weight=2.0):
     """
     Train for one epoch.
     
@@ -418,6 +436,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
     total_loss = 0.0
     total_loss_vel = 0.0
     total_loss_stress = 0.0
+    total_loss_pos = 0.0
     num_samples = 0
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -443,6 +462,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
         epoch_loss_batch = 0.0
         epoch_loss_vel_batch = 0.0
         epoch_loss_stress_batch = 0.0
+        epoch_loss_pos_batch = 0.0
         
         # Process each timestep (starting from t=1 since we need previous position for velocity)
         for t in range(1, T):
@@ -486,7 +506,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
             stress_error_masked = stress_error * node_mask  # (B, N)
             loss_stress = stress_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
             
-            # Weight velocity loss to balance with stress loss
+            # Combined loss: velocity + stress
             loss = velocity_loss_weight * loss_vel + loss_stress
             
             # Backward pass
@@ -636,10 +656,15 @@ def main():
         # Save predictions if requested
         if args.save_predictions and (epoch + 1) % args.save_predictions_every == 0:
             predictions_dir = os.path.join(args.checkpoint_dir, 'predictions')
-            save_predictions(
-                model, eval_dataloader, device, predictions_dir, epoch,
-                num_trajectories=args.num_trajectories_for_predictions
-            )
+            try:
+                save_predictions(
+                    model, eval_dataloader, device, predictions_dir, epoch,
+                    num_trajectories=args.num_trajectories_for_predictions
+                )
+            except Exception as e:
+                print(f"  ⚠ Warning: Failed to save predictions for epoch {epoch+1}: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Save checkpoint
         if avg_loss < best_loss:

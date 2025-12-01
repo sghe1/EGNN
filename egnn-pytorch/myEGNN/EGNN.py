@@ -36,14 +36,17 @@ class MeshEGNN(nn.Module):
         )
 
         # φ_x: takes m_ij and outputs a scalar weight (Eq. (7))
+        # Add tanh to constrain output to [-1, 1] to prevent explosion
         self.phi_x = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
+            nn.Tanh()  # Constrain to [-1, 1] to prevent large neighbor terms
         )
         
-        # Constant C (can be learnable)
-        self.C = nn.Parameter(torch.tensor(C, dtype=torch.float32))
+        # Constant C (can be learnable) - initialize to small value to match velocity scale
+        # Velocities are ~1e-4, so C should be small (e.g., 1e-4 or 1e-5)
+        self.C = nn.Parameter(torch.tensor(C * 1e-4, dtype=torch.float32))  # Scale down C
         
         # Stress head (unchanged)
         self.stress_head = nn.Linear(hidden_dim, 1)
@@ -112,8 +115,15 @@ class MeshEGNN(nn.Module):
         phi_x_masked = phi_x_output.unsqueeze(-1) * adj_mask.unsqueeze(-1)  # (B, N, N, 1)
         neighbor_term = torch.sum(rel_pos * phi_x_masked, dim=2)  # (B, N, 3)
         
+        # Normalize neighbor_term by number of neighbors to prevent explosion
+        # Count neighbors per node
+        num_neighbors = adj_mask.sum(dim=2, keepdim=True)  # (B, N, 1)
+        num_neighbors = torch.clamp(num_neighbors, min=1.0)  # Avoid division by zero
+        neighbor_term = neighbor_term / num_neighbors  # Normalize by neighbor count
+        
         # Compute scalar gate φ_v(h_i^l) (γ_i in Eq. (7))
-        gamma = self.phi_v(h)               # (B, N, 1)
+        # Add sigmoid to constrain gamma to [0, 1] to prevent velocity explosion
+        gamma = torch.sigmoid(self.phi_v(h))  # (B, N, 1) - now in [0, 1]
 
         # Velocity prediction (Eq. (7)):
         # v_i^{l+1} = φ_v(h_i^l) v_i^{init} + C ∑_{j≠i} (x_i^l - x_j^l) φ_x(m_ij)

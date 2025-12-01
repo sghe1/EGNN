@@ -7,6 +7,7 @@ Generates predictions for velocity and stress and saves them for comparison with
 import os
 import sys
 import json
+import pickle
 import argparse
 import torch
 import torch.nn.functional as F
@@ -134,14 +135,20 @@ def evaluate_model(model, dataloader, device, save_dir, num_trajectories=None):
     print(f"\nSaving predictions to {save_dir}...")
     
     # Save as numpy arrays
-    # Save as lists of arrays (allow_pickle=True allows saving lists with different shapes)
-    # Different trajectories may have different numbers of nodes (N)
-    np.save(os.path.join(save_dir, 'predictions_velocity.npy'), np.array(all_pred_vel, dtype=object), allow_pickle=True)
-    np.save(os.path.join(save_dir, 'predictions_stress.npy'), np.array(all_pred_stress, dtype=object), allow_pickle=True)
-    np.save(os.path.join(save_dir, 'predictions_positions.npy'), np.array(all_pred_pos, dtype=object), allow_pickle=True)
-    np.save(os.path.join(save_dir, 'true_velocity.npy'), np.array(all_true_vel, dtype=object), allow_pickle=True)
-    np.save(os.path.join(save_dir, 'true_stress.npy'), np.array(all_true_stress, dtype=object), allow_pickle=True)
-    np.save(os.path.join(save_dir, 'true_positions.npy'), np.array(all_true_pos, dtype=object), allow_pickle=True)
+    # Save as lists of arrays using pickle (handles variable shapes across trajectories)
+    # Use pickle directly to avoid numpy's array conversion issues
+    with open(os.path.join(save_dir, 'predictions_velocity.npy'), 'wb') as f:
+        pickle.dump(all_pred_vel, f)
+    with open(os.path.join(save_dir, 'predictions_stress.npy'), 'wb') as f:
+        pickle.dump(all_pred_stress, f)
+    with open(os.path.join(save_dir, 'predictions_positions.npy'), 'wb') as f:
+        pickle.dump(all_pred_pos, f)
+    with open(os.path.join(save_dir, 'true_velocity.npy'), 'wb') as f:
+        pickle.dump(all_true_vel, f)
+    with open(os.path.join(save_dir, 'true_stress.npy'), 'wb') as f:
+        pickle.dump(all_true_stress, f)
+    with open(os.path.join(save_dir, 'true_positions.npy'), 'wb') as f:
+        pickle.dump(all_true_pos, f)
     
     # Compute and save metrics
     metrics = compute_metrics(all_pred_vel, all_pred_stress, all_true_vel, all_true_stress)
