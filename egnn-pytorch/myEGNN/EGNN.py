@@ -48,8 +48,15 @@ class MeshEGNN(nn.Module):
         # Velocities are ~1e-4, so C should be small (e.g., 1e-4 or 1e-5)
         self.C = nn.Parameter(torch.tensor(C * 1e-4, dtype=torch.float32))  # Scale down C
         
-        # Stress head (unchanged)
-        self.stress_head = nn.Linear(hidden_dim, 1)
+        # Stress head: MLP to better capture stress patterns
+        # Stress is a complex function of node embeddings, so use a deeper network
+        self.stress_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1)
+        )
         
         # Extract initial velocity from features: feats = [node_type(1), vel(3), acc(3), stress(1)]
         self.vel_init_start_idx = 1  # After node_type
@@ -127,7 +134,18 @@ class MeshEGNN(nn.Module):
 
         # Velocity prediction (Eq. (7)):
         # v_i^{l+1} = φ_v(h_i^l) v_i^{init} + C ∑_{j≠i} (x_i^l - x_j^l) φ_x(m_ij)
+        # Further constrain neighbor_term by its magnitude to prevent explosion
+        neighbor_term_magnitude = torch.norm(neighbor_term, dim=-1, keepdim=True)  # (B, N, 1)
+        # Clamp neighbor_term magnitude to be at most 10x the typical velocity scale (1e-4)
+        max_neighbor_magnitude = 1e-3  # 10x typical velocity
+        neighbor_term_scale = torch.clamp(max_neighbor_magnitude / (neighbor_term_magnitude + 1e-8), max=1.0)
+        neighbor_term = neighbor_term * neighbor_term_scale
+        
         pred_vel = gamma * v_init + self.C * neighbor_term   # (B, N, 3)
+        
+        # Final safety: clamp predicted velocity to reasonable range
+        # Typical velocities are ~1e-4, so clamp to [-1e-3, 1e-3] as safety
+        pred_vel = torch.clamp(pred_vel, min=-1e-3, max=1e-3)
         
         # Stress prediction from node embeddings
         pred_stress = self.stress_head(h)

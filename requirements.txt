@@ -1,0 +1,24 @@
+# Core ML and Deep Learning
+torch>=1.6.0
+numpy>=1.19.0
+
+# EGNN Package Dependencies
+einops>=0.3.0
+numba>=0.50.0
+
+# Data Loading
+tfrecord>=1.14.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# Utilities
+tqdm>=4.50.0
+
+# Standard Library (included for reference, no installation needed)
+# - os
+# - sys
+# - json
+# - pickle
+# - argparse
+# - subprocess

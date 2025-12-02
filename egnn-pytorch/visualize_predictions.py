@@ -11,6 +11,8 @@ import json
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
@@ -84,9 +86,44 @@ def visualize_mesh_pair(pos_true, pos_pred, stress_true=None, stress_pred=None,
     if color_mode != "none" and stress_true is not None and stress_pred is not None:
         intensity_true = stress_true.flatten() if len(stress_true.shape) > 1 else stress_true
         intensity_pred = stress_pred.flatten() if len(stress_pred.shape) > 1 else stress_pred
+        
+        # Debug: print stress ranges
+        print(f"Stress ranges - True: min={intensity_true.min():.6f}, max={intensity_true.max():.6f}, "
+              f"mean={intensity_true.mean():.6f}, std={intensity_true.std():.6f}")
+        print(f"Stress ranges - Pred: min={intensity_pred.min():.6f}, max={intensity_pred.max():.6f}, "
+              f"mean={intensity_pred.mean():.6f}, std={intensity_pred.std():.6f}")
+        
+        # Calculate separate color scales for true and predicted to show variation in each
+        # This is important because predicted values might be in a very different range
+        vmin_true = intensity_true.min()
+        vmax_true = intensity_true.max()
+        vmin_pred = intensity_pred.min()
+        vmax_pred = intensity_pred.max()
+        
+        # If all values are the same, add a small range to make colormap work
+        if abs(vmax_true - vmin_true) < 1e-10:
+            print(f"Warning: All true stress values are nearly identical ({vmin_true:.6f}). Using small range for colormap.")
+            vmin_true = vmin_true - abs(vmin_true) * 0.01 if abs(vmin_true) > 1e-10 else -1.0
+            vmax_true = vmax_true + abs(vmax_true) * 0.01 if abs(vmax_true) > 1e-10 else 1.0
+        
+        if abs(vmax_pred - vmin_pred) < 1e-10:
+            print(f"Warning: All predicted stress values are nearly identical ({vmin_pred:.6f}). Using small range for colormap.")
+            vmin_pred = vmin_pred - abs(vmin_pred) * 0.01 if abs(vmin_pred) > 1e-10 else -1.0
+            vmax_pred = vmax_pred + abs(vmax_pred) * 0.01 if abs(vmax_pred) > 1e-10 else 1.0
+        
+        # Use diverging colormap if values can be negative, otherwise sequential
+        if vmin_true < 0 or vmin_pred < 0:
+            cmap = 'RdBu_r'  # Red-Blue diverging (reversed)
+        else:
+            cmap = 'viridis'  # Sequential
     else:
         intensity_true = None
         intensity_pred = None
+        vmin_true = 0
+        vmax_true = 1
+        vmin_pred = 0
+        vmax_pred = 1
+        cmap = 'viridis'
     
     # True mesh
     ax1 = fig.add_subplot(121, projection='3d')
@@ -97,54 +134,121 @@ def visualize_mesh_pair(pos_true, pos_pred, stress_true=None, stress_pred=None,
           f"Z: [{pos_true[:, 2].min():.4f}, {pos_true[:, 2].max():.4f}], "
           f"Num points: {len(pos_true)}")
     
-    # Always use scatter plot for nodes (more reliable)
-    if intensity_true is not None:
-        # Calculate vmax for color scale
-        vmax_val = max(intensity_true.max(), intensity_pred.max() if intensity_pred is not None else 1) if intensity_pred is not None else intensity_true.max()
-        if vmax_val == 0:
-            vmax_val = 1  # Avoid division by zero
-        
-        # Use a larger point size and ensure values are properly scaled
-        scatter1 = ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
-                              c=intensity_true, cmap='viridis', s=50, alpha=1.0, 
-                              edgecolors='black', linewidths=0.2, vmin=0, vmax=vmax_val)
-        cbar1 = plt.colorbar(scatter1, ax=ax1, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
-    else:
-        ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2], 
-                   c='blue', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
-    
-    # Optionally overlay mesh faces if cells are available
+    # Draw mesh faces if cells are available (continuous surface)
     if cells is not None and len(cells) > 0:
         try:
-            # Plot mesh edges using cells (quads)
-            for cell in cells[:500]:  # Limit for performance
+            # Create Poly3DCollection for filled faces
+            faces = []
+            face_colors = []
+            
+            # Use all cells for better visualization
+            max_cells = len(cells)
+            
+            for cell_idx, cell in enumerate(cells[:max_cells]):
                 cell_indices = np.asarray(cell, dtype=int)
                 # Ensure indices are within bounds
                 valid_indices = cell_indices[cell_indices < len(pos_true)]
                 if len(valid_indices) >= 3:
-                    quad = pos_true[valid_indices]
-                    # Draw edges of the quad
-                    if len(quad) == 4:
-                        # Draw quad edges
-                        edges = [
-                            [quad[0], quad[1]], [quad[1], quad[2]],
-                            [quad[2], quad[3]], [quad[3], quad[0]]
-                        ]
-                    elif len(quad) == 3:
-                        # Draw triangle edges
-                        edges = [
-                            [quad[0], quad[1]], [quad[1], quad[2]], [quad[2], quad[0]]
-                        ]
-                    else:
-                        continue
+                    face_verts = pos_true[valid_indices]
                     
-                    for edge in edges:
-                        ax1.plot3D([edge[0][0], edge[1][0]], 
-                                  [edge[0][1], edge[1][1]], 
-                                  [edge[0][2], edge[1][2]], 
-                                  'k-', alpha=0.1, linewidth=0.5)
+                    # For quads, split into two triangles
+                    if len(face_verts) == 4:
+                        # Two triangles: [0,1,2] and [0,2,3]
+                        faces.append([face_verts[0], face_verts[1], face_verts[2]])
+                        faces.append([face_verts[0], face_verts[2], face_verts[3]])
+                        
+                        # Get stress value for this cell (average of vertices)
+                        if intensity_true is not None:
+                            cell_stress_1 = intensity_true[valid_indices[:3]].mean()
+                            cell_stress_2 = intensity_true[[valid_indices[0], valid_indices[2], valid_indices[3]]].mean()
+                            face_colors.append(cell_stress_1)
+                            face_colors.append(cell_stress_2)
+                    elif len(face_verts) == 3:
+                        faces.append([face_verts[0], face_verts[1], face_verts[2]])
+                        if intensity_true is not None:
+                            cell_stress = intensity_true[valid_indices].mean()
+                            face_colors.append(cell_stress)
+            
+            print(f"DEBUG: Created {len(faces)} faces from {max_cells} cells")
+            
+            if len(faces) > 0:
+                # Create Poly3DCollection
+                if intensity_true is not None and len(face_colors) == len(faces):
+                    # Map stress values to colors using colormap with TRUE scale
+                    norm_true = mcolors.Normalize(vmin=vmin_true, vmax=vmax_true)
+                    try:
+                        colormap = plt.colormaps[cmap]
+                    except (KeyError, AttributeError):
+                        colormap = cm.get_cmap(cmap)
+                    # Map colors and ensure they're in RGBA format
+                    face_colors_mapped = []
+                    for c in face_colors:
+                        rgba = colormap(norm_true(c))
+                        # Ensure it's a tuple/list of 4 values (RGBA)
+                        if isinstance(rgba, tuple) and len(rgba) == 4:
+                            face_colors_mapped.append(rgba)
+                        elif isinstance(rgba, np.ndarray):
+                            face_colors_mapped.append(tuple(rgba))
+                        else:
+                            # Convert to RGBA tuple
+                            face_colors_mapped.append((rgba[0], rgba[1], rgba[2], 1.0))
+                    
+                    print(f"Created {len(faces)} faces with stress coloring (range: {min(face_colors):.2f} to {max(face_colors):.2f}, scale: {vmin_true:.2f} to {vmax_true:.2f})")
+                    
+                    # Use stress for coloring - create collection first, then set colors
+                    face_collection = Poly3DCollection(faces, alpha=0.9, linewidths=0.0, edgecolors='none')
+                    face_collection.set_facecolor(face_colors_mapped)
+                    ax1.add_collection3d(face_collection)
+                    
+                    # Also add scatter points with stress coloring as backup/overlay for better visibility
+                    scatter1 = ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
+                                          c=intensity_true, cmap=colormap, s=20, alpha=0.6, 
+                                          edgecolors='none', vmin=vmin_true, vmax=vmax_true)
+                    
+                    # Create a ScalarMappable for the colorbar
+                    sm = cm.ScalarMappable(cmap=colormap, norm=norm_true)
+                    sm.set_array([])
+                    cbar1 = plt.colorbar(sm, ax=ax1, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+                    print(f"DEBUG: Added Poly3DCollection with {len(face_collection._facecolors)} face colors + scatter overlay")
+                else:
+                    # No coloring, use uniform color
+                    print(f"Warning: face_colors length ({len(face_colors) if intensity_true is not None else 0}) != faces length ({len(faces)})")
+                    face_collection = Poly3DCollection(faces, alpha=1.0, linewidths=0.1, edgecolors='none', facecolors='lightblue')
+                    ax1.add_collection3d(face_collection)
+            else:
+                print("Warning: No valid faces created, falling back to scatter plot")
+                # Fallback to scatter if no valid faces
+                if intensity_true is not None:
+                    scatter1 = ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
+                                          c=intensity_true, cmap=cmap, s=50, alpha=1.0, 
+                                          edgecolors='black', linewidths=0.2, vmin=vmin_true, vmax=vmax_true)
+                    cbar1 = plt.colorbar(scatter1, ax=ax1, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+                else:
+                    ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2], 
+                               c='blue', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
         except Exception as e:
-            print(f"Warning: Could not plot mesh edges: {e}")
+            import traceback
+            print(f"ERROR: Could not plot mesh faces: {e}")
+            traceback.print_exc()
+            # Fallback to scatter plot
+            if intensity_true is not None:
+                scatter1 = ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
+                                      c=intensity_true, cmap=cmap, s=50, alpha=1.0, 
+                                      edgecolors='black', linewidths=0.2, vmin=vmin_true, vmax=vmax_true)
+                cbar1 = plt.colorbar(scatter1, ax=ax1, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+            else:
+                ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2], 
+                           c='blue', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
+    else:
+        # No cells available, use scatter plot
+        if intensity_true is not None:
+            scatter1 = ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
+                                  c=intensity_true, cmap=cmap, s=50, alpha=1.0, 
+                                  edgecolors='black', linewidths=0.2, vmin=vmin_true, vmax=vmax_true)
+            cbar1 = plt.colorbar(scatter1, ax=ax1, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+        else:
+            ax1.scatter(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2], 
+                       c='blue', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
     
     ax1.set_title(title_true, fontsize=14, fontweight='bold')
     ax1.set_xlabel('X')
@@ -160,54 +264,118 @@ def visualize_mesh_pair(pos_true, pos_pred, stress_true=None, stress_pred=None,
           f"Z: [{pos_pred[:, 2].min():.4f}, {pos_pred[:, 2].max():.4f}], "
           f"Num points: {len(pos_pred)}")
     
-    # Always use scatter plot for nodes (more reliable)
-    if intensity_pred is not None:
-        # Calculate vmax for color scale (use same as true for comparison)
-        vmax_val = max(intensity_true.max() if intensity_true is not None else 1, intensity_pred.max())
-        if vmax_val == 0:
-            vmax_val = 1  # Avoid division by zero
-        
-        # Use same color scale as true for fair comparison
-        scatter2 = ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2],
-                              c=intensity_pred, cmap='viridis', s=50, alpha=1.0,
-                              edgecolors='black', linewidths=0.2, vmin=0, vmax=vmax_val)
-        cbar2 = plt.colorbar(scatter2, ax=ax2, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
-    else:
-        ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2], 
-                   c='red', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
-    
-    # Optionally overlay mesh faces if cells are available
+    # Draw mesh faces if cells are available (continuous surface)
     if cells is not None and len(cells) > 0:
         try:
-            # Plot mesh edges using cells (quads)
-            for cell in cells[:500]:  # Limit for performance
+            # Create Poly3DCollection for filled faces
+            faces = []
+            face_colors = []
+            
+            # Use all cells for better visualization
+            max_cells = len(cells)
+            
+            for cell_idx, cell in enumerate(cells[:max_cells]):
                 cell_indices = np.asarray(cell, dtype=int)
                 # Ensure indices are within bounds
                 valid_indices = cell_indices[cell_indices < len(pos_pred)]
                 if len(valid_indices) >= 3:
-                    quad = pos_pred[valid_indices]
-                    # Draw edges of the quad
-                    if len(quad) == 4:
-                        # Draw quad edges
-                        edges = [
-                            [quad[0], quad[1]], [quad[1], quad[2]],
-                            [quad[2], quad[3]], [quad[3], quad[0]]
-                        ]
-                    elif len(quad) == 3:
-                        # Draw triangle edges
-                        edges = [
-                            [quad[0], quad[1]], [quad[1], quad[2]], [quad[2], quad[0]]
-                        ]
-                    else:
-                        continue
+                    face_verts = pos_pred[valid_indices]
                     
-                    for edge in edges:
-                        ax2.plot3D([edge[0][0], edge[1][0]], 
-                                  [edge[0][1], edge[1][1]], 
-                                  [edge[0][2], edge[1][2]], 
-                                  'k-', alpha=0.1, linewidth=0.5)
+                    # For quads, split into two triangles
+                    if len(face_verts) == 4:
+                        # Two triangles: [0,1,2] and [0,2,3]
+                        faces.append([face_verts[0], face_verts[1], face_verts[2]])
+                        faces.append([face_verts[0], face_verts[2], face_verts[3]])
+                        
+                        # Get stress value for this cell (average of vertices)
+                        if intensity_pred is not None:
+                            cell_stress_1 = intensity_pred[valid_indices[:3]].mean()
+                            cell_stress_2 = intensity_pred[[valid_indices[0], valid_indices[2], valid_indices[3]]].mean()
+                            face_colors.append(cell_stress_1)
+                            face_colors.append(cell_stress_2)
+                    elif len(face_verts) == 3:
+                        faces.append([face_verts[0], face_verts[1], face_verts[2]])
+                        if intensity_pred is not None:
+                            cell_stress = intensity_pred[valid_indices].mean()
+                            face_colors.append(cell_stress)
+            
+            print(f"DEBUG: Created {len(faces)} faces from {max_cells} cells (predicted)")
+            
+            if len(faces) > 0:
+                # Create Poly3DCollection
+                if intensity_pred is not None and len(face_colors) == len(faces):
+                    # Map stress values to colors using colormap with PREDICTED scale
+                    norm_pred = mcolors.Normalize(vmin=vmin_pred, vmax=vmax_pred)
+                    try:
+                        colormap = plt.colormaps[cmap]
+                    except (KeyError, AttributeError):
+                        colormap = cm.get_cmap(cmap)
+                    # Map colors and ensure they're in RGBA format
+                    face_colors_mapped = []
+                    for c in face_colors:
+                        rgba = colormap(norm_pred(c))
+                        # Ensure it's a tuple/list of 4 values (RGBA)
+                        if isinstance(rgba, tuple) and len(rgba) == 4:
+                            face_colors_mapped.append(rgba)
+                        elif isinstance(rgba, np.ndarray):
+                            face_colors_mapped.append(tuple(rgba))
+                        else:
+                            # Convert to RGBA tuple
+                            face_colors_mapped.append((rgba[0], rgba[1], rgba[2], 1.0))
+                    
+                    print(f"Created {len(faces)} faces with stress coloring (range: {min(face_colors):.2f} to {max(face_colors):.2f}, scale: {vmin_pred:.2f} to {vmax_pred:.2f})")
+                    
+                    # Use stress for coloring - create collection first, then set colors
+                    face_collection = Poly3DCollection(faces, alpha=0.9, linewidths=0.0, edgecolors='none')
+                    face_collection.set_facecolor(face_colors_mapped)
+                    ax2.add_collection3d(face_collection)
+                    
+                    # Also add scatter points with stress coloring as backup/overlay for better visibility
+                    scatter2 = ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2],
+                                          c=intensity_pred, cmap=colormap, s=20, alpha=0.6,
+                                          edgecolors='none', vmin=vmin_pred, vmax=vmax_pred)
+                    
+                    # Create a ScalarMappable for the colorbar
+                    sm = cm.ScalarMappable(cmap=colormap, norm=norm_pred)
+                    sm.set_array([])
+                    cbar2 = plt.colorbar(sm, ax=ax2, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+                    print(f"DEBUG: Added Poly3DCollection with {len(face_collection._facecolors)} face colors + scatter overlay (predicted)")
+                else:
+                    # No coloring, use uniform color
+                    print(f"Warning: face_colors length ({len(face_colors) if intensity_pred is not None else 0}) != faces length ({len(faces)})")
+                    face_collection = Poly3DCollection(faces, alpha=1.0, linewidths=0.1, edgecolors='none', facecolors='lightcoral')
+                    ax2.add_collection3d(face_collection)
+            else:
+                # Fallback to scatter if no valid faces
+                if intensity_pred is not None:
+                    scatter2 = ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2],
+                                          c=intensity_pred, cmap=cmap, s=50, alpha=1.0,
+                                          edgecolors='black', linewidths=0.2, vmin=vmin_pred, vmax=vmax_pred)
+                    cbar2 = plt.colorbar(scatter2, ax=ax2, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+                else:
+                    ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2], 
+                               c='red', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
         except Exception as e:
-            print(f"Warning: Could not plot mesh edges: {e}")
+            print(f"Warning: Could not plot mesh faces: {e}")
+            # Fallback to scatter plot
+            if intensity_pred is not None:
+                scatter2 = ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2],
+                                      c=intensity_pred, cmap=cmap, s=50, alpha=1.0,
+                                      edgecolors='black', linewidths=0.2, vmin=vmin_pred, vmax=vmax_pred)
+                cbar2 = plt.colorbar(scatter2, ax=ax2, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+            else:
+                ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2], 
+                           c='red', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
+    else:
+        # No cells available, use scatter plot
+        if intensity_pred is not None:
+            scatter2 = ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2],
+                                  c=intensity_pred, cmap=cmap, s=50, alpha=1.0,
+                                  edgecolors='black', linewidths=0.2, vmin=vmin_pred, vmax=vmax_pred)
+            cbar2 = plt.colorbar(scatter2, ax=ax2, label='Stress' if color_mode == 'stress' else 'Intensity', shrink=0.8)
+        else:
+            ax2.scatter(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2], 
+                       c='red', s=50, alpha=1.0, edgecolors='black', linewidths=0.2)
     
     ax2.set_title(title_pred, fontsize=14, fontweight='bold')
     ax2.set_xlabel('X')
