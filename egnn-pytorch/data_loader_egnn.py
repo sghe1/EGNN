@@ -1,3 +1,30 @@
+"""
+Data loading utilities for deforming_plate dataset.
+
+Dataset Structure (per trajectory):
+- 400 time steps
+- Variable number of nodes (~1271 on average)
+- Each TFRecord example = one full trajectory
+
+Input Node Features (8 dimensions):
+- position(3): Current 3D world position (x, y, z) at time t
+- actuation(3): Boundary displacement / input signal for the node
+- node_type_one_hot(2): One-hot encoding [is_plate_node, is_actuated_node]
+
+Targets (separate from inputs):
+- velocity: (T, N, 3) - Lagrangian velocity computed as pos[t] - pos[t-1]
+- stress: (T, N, 1) - Scalar von-Mises stress per node per timestep
+
+Mesh Connectivity:
+- cells: (C, 4) - Tetrahedral cell connectivity (4 node indices per cell)
+- Used to derive graph edges (element adjacency)
+
+Important:
+- Velocity and stress are TARGETS only, NOT part of input features
+- Position in features is the same as coordinates (world_pos)
+- Actuation may not be in TFRecord - if missing, set to zeros
+"""
+
 import json
 import numpy as np
 import torch
@@ -92,12 +119,25 @@ def decode_trajectory_from_record(record, meta):
     if cells.shape[0] == 1:
         cells = cells[0]
 
+    # Try to load actuation if available, otherwise set to zeros
+    # Actuation represents boundary displacement / input signal per node
+    actuation = None
+    if "actuation" in record and "actuation" in shapes:
+        actuation = decode_raw_array(record["actuation"], np.float32,
+                                     shapes["actuation"]["shape"])
+        actuation = actuation.astype(np.float32)
+    elif "boundary_displacement" in record and "boundary_displacement" in shapes:
+        actuation = decode_raw_array(record["boundary_displacement"], np.float32,
+                                     shapes["boundary_displacement"]["shape"])
+        actuation = actuation.astype(np.float32)
+
     return {
         "world_pos": world_pos.astype(np.float32),  # (T, N, 3)
-        "stress": stress.astype(np.float32),        # (T, N, 1)
+        "stress": stress.astype(np.float32),        # (T, N, 1) - TARGET, not input
         "node_type": node_type.astype(np.int32),    # (N, 1)
         "mesh_pos": mesh_pos.astype(np.float32),    # (N, 3)
-        "cells": cells.astype(np.int32),            # (C, 4)
+        "cells": cells.astype(np.int32),            # (C, 4) - for connectivity only
+        "actuation": actuation,  # (T, N, 3) or None - input feature
     }
 
 
@@ -136,42 +176,85 @@ def build_edges_from_cells(cells, num_nodes):
 # ============================================================
 
 def trajectory_to_egnn_inputs(traj):
-    world_pos = traj["world_pos"]   # (T,N,3)
-    stress = traj["stress"]         # (T,N,1)
-    node_type = traj["node_type"]   # (N,1)
-    cells = traj["cells"]           # (C,4)
+    """
+    Construct EGNN inputs from trajectory data.
+    
+    According to the deforming_plate dataset specification:
+    - Input node features: [position(3), actuation(3), node_type_one_hot(2)] = 8 dims
+    - Targets (separate): velocity (T, N, 3), stress (T, N, 1)
+    - Coordinates: world_pos (T, N, 3) - used as node positions in graph
+    
+    Args:
+        traj: Dictionary with keys:
+            - world_pos: (T, N, 3) - 3D positions over time
+            - stress: (T, N, 1) - stress values (TARGET, not input)
+            - node_type: (N, 1) - node type integer codes
+            - cells: (C, 4) - tetrahedral cell connectivity
+            - actuation: (T, N, 3) or None - actuation/boundary displacement
+    
+    Returns:
+        coors_seq: (T, N, 3) - node coordinates (same as world_pos)
+        feats_seq: (T, N, 8) - node features [pos(3), actuation(3), node_type_one_hot(2)]
+        edge_index: (E, 2) - edge connectivity from cells
+    """
+    world_pos = traj["world_pos"]   # (T, N, 3) - positions over time
+    stress = traj["stress"]         # (T, N, 1) - TARGET, not input
+    node_type = traj["node_type"]   # (N, 1) - node type codes
+    cells = traj["cells"]           # (C, 4) - tetrahedral connectivity
+    actuation = traj.get("actuation", None)  # (T, N, 3) or None
 
     T, N, _ = world_pos.shape
 
-    coors_seq = torch.tensor(world_pos, dtype=torch.float32)
+    # Coordinates are the world positions
+    coors_seq = torch.tensor(world_pos, dtype=torch.float32)  # (T, N, 3)
 
-    vel = np.zeros((T, N, 3), dtype=np.float32)
-    acc = np.zeros((T, N, 3), dtype=np.float32)
+    # Construct 8D input features: [position(3), actuation(3), node_type_one_hot(2)]
+    # Position: use current world position at each timestep
+    # Actuation: boundary displacement / input signal (if available, else zeros)
+    # Node type: convert to 2-class one-hot encoding
+    
+    # Handle actuation: if not available, set to zeros
+    if actuation is None:
+        # Actuation not in TFRecord - set to zeros
+        # TODO: If actuation field exists in TFRecord, load it here
+        actuation = np.zeros((T, N, 3), dtype=np.float32)
+    else:
+        # Ensure actuation has correct shape
+        if actuation.shape != (T, N, 3):
+            # If actuation is static (N, 3), tile it over time
+            if len(actuation.shape) == 2 and actuation.shape == (N, 3):
+                actuation = np.tile(actuation[np.newaxis, :, :], (T, 1, 1))
+            else:
+                raise ValueError(f"Unexpected actuation shape: {actuation.shape}, expected (T, N, 3) or (N, 3)")
 
-    if T > 1:
-        vel[1] = world_pos[1] - world_pos[0]
+    # Convert node_type to one-hot encoding
+    # According to meshgraphnets/common.py NodeType enum:
+    # - NORMAL = 0 (plate nodes, where we compute loss)
+    # - OBSTACLE = 1 (boundary nodes, no loss)
+    # - HANDLE = 3 (actuator nodes, no loss)
+    # Encoding: 0 -> [0, 0] (NORMAL/plate), 1 -> [1, 0] (OBSTACLE), 3 -> [0, 1] (HANDLE)
+    # node_type == 0 (NORMAL) indicates plate nodes (where we compute loss)
+    # node_type == 1 (OBSTACLE) or 3 (HANDLE) are boundary/actuator nodes (fixed, no loss)
+    node_type_flat = node_type.flatten()  # (N,)
+    node_type_one_hot = np.zeros((N, 2), dtype=np.float32)
+    node_type_one_hot[node_type_flat == 0, :] = [0.0, 0.0]  # Type 0 -> [0, 0]
+    node_type_one_hot[node_type_flat == 1, :] = [1.0, 0.0]  # Type 1 (plate) -> [1, 0]
+    node_type_one_hot[node_type_flat == 3, :] = [0.0, 1.0]  # Type 3 -> [0, 1]
 
-    for t in range(2, T):
-        vel[t] = world_pos[t] - world_pos[t - 1]
-        acc[t] = world_pos[t] - 2 * world_pos[t - 1] + world_pos[t - 2]
-
-    node_type_f = node_type.astype(np.float32)
-
+    # Construct features for each timestep
     feats = []
     for t in range(T):
-        feats_t = np.concatenate(
-            [
-                node_type_f,    # (N,1)
-                vel[t],         # (N,3)
-                acc[t],         # (N,3)
-                stress[t],      # (N,1)
-            ],
-            axis=-1
-        )
+        # Concatenate: [position(3), actuation(3), node_type_one_hot(2)] = 8 dims
+        feats_t = np.concatenate([
+            world_pos[t],              # (N, 3) - current position
+            actuation[t],               # (N, 3) - actuation/boundary displacement
+            node_type_one_hot,         # (N, 2) - one-hot node type
+        ], axis=-1)  # -> (N, 8)
         feats.append(feats_t)
 
-    feats_seq = torch.tensor(np.stack(feats, axis=0), dtype=torch.float32)
+    feats_seq = torch.tensor(np.stack(feats, axis=0), dtype=torch.float32)  # (T, N, 8)
 
+    # Build edge connectivity from tetrahedral cells
     edge_index = build_edges_from_cells(cells, num_nodes=N)
 
     return coors_seq, feats_seq, edge_index

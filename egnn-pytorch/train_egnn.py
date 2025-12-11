@@ -2,6 +2,27 @@
 """
 Training script for EGNN on deforming plate dataset.
 Uses data_loader_egnn.py to load data and MeshEGNN model.
+
+Dataset Structure:
+- Input features: [position(3), actuation(3), node_type_one_hot(2)] = 8 dims
+- Targets: velocity (T, N, 3), stress (T, N, 1)
+- Coordinates: world_pos (T, N, 3) - same as position in features
+
+Normalization Pipeline (MeshGraphNet-style):
+- ALL inputs are normalized BEFORE going into the model:
+  * Positions: (pos - pos_mean) / pos_std
+  * Actuation: (act - act_mean) / act_std
+  * Node type: unchanged (one-hot)
+- ALL targets are normalized BEFORE computing loss:
+  * Velocity: vel / vel_std
+  * Stress: (stress - stress_mean) / stress_std
+- Model operates entirely in normalized space (O(1) magnitudes)
+- Denormalization happens ONLY when saving predictions for visualization
+
+Training Process:
+- For each timestep t, model predicts normalized velocity and stress at time t
+- Loss is computed on normalized values
+- Denormalization only for saving predictions
 """
 
 import os
@@ -26,184 +47,32 @@ egnn_pytorch_dir = os.path.join(script_dir, 'egnn-pytorch')
 sys.path.insert(0, script_dir)
 sys.path.insert(0, egnn_pytorch_dir)
 
-from data_loader_egnn import data_loader_egnn, trajectory_to_egnn_inputs, load_raw_trajectory_from_tfrecord
+from data_loader_egnn import data_loader_egnn, trajectory_to_egnn_inputs, load_raw_trajectory_from_tfrecord, build_edges_from_cells
 from tfrecord.reader import tfrecord_loader
 
-# Import EGNN - try different paths
-try:
-    from myEGNN.EGNN import MeshEGNN
-except ImportError:
-    try:
-        # Try importing from egnn-pytorch package
-        from egnn_pytorch.egnn_pytorch import EGNN_Network
-    except ImportError:
-        # Try relative import
-        sys.path.insert(0, os.path.join(egnn_pytorch_dir, 'egnn_pytorch'))
-        from egnn_pytorch import EGNN_Network
-    
-    import torch.nn as nn
-    
-    import torch.nn.functional as F
-    
-    class MeshEGNN(nn.Module):
-        """
-        Mesh EGNN following the paper formulas:
-        - v_i^{l+1} = phi_v(h_i^l) * v_i^init + C * sum_j (x_i^l - x_j^l) * phi_x(m_ij)
-        - x_i^{l+1} = x_i^l + v_i^{l+1}
-        """
-        def __init__(self, in_dim, hidden_dim, out_dim=None, edge_dim=0, depth=4, C=1.0):
-            super().__init__()
-            self.input_mlp  = nn.Linear(in_dim, hidden_dim)
-            self.egnn       = EGNN_Network(
-                num_tokens=None,
-                dim=hidden_dim,
-                depth=depth,
-                edge_dim=edge_dim,
-                only_sparse_neighbors=True,
-            )
-            
-            # phi_v: MLP that takes h and outputs a 1D vector to modulate initial velocity
-            self.phi_v = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1)
-            )
-            
-            # φ_e: edge/message MLP, builds m_ij from (h_i, h_j, ||x_i - x_j||^2, a_ij)
-            # Here we have no explicit edge attributes a_ij, so we omit them.
-            self.phi_e = nn.Sequential(
-                nn.Linear(hidden_dim * 2 + 1, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU()
-            )
-
-            # φ_x: takes m_ij and outputs a scalar weight (Eq. (7))
-            # Add tanh to constrain output to [-1, 1] to prevent explosion
-            self.phi_x = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-                nn.Tanh()  # Constrain to [-1, 1] to prevent large neighbor terms
-            )
-            
-            # Constant C (can be learnable) - initialize to small value to match velocity scale
-            # Velocities are ~1e-4, so C should be small (e.g., 1e-4 or 1e-5)
-            self.C = nn.Parameter(torch.tensor(C * 1e-4, dtype=torch.float32))  # Scale down C
-            
-            # Stress head (unchanged)
-            # Stress head: MLP to better capture stress patterns
-            # Stress is a complex function of node embeddings, so use a deeper network
-            self.stress_head = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 1)
-            )
-            
-            # Extract initial velocity from features: feats = [node_type(1), vel(3), acc(3), stress(1)]
-            self.vel_init_start_idx = 1  # After node_type
-            self.vel_init_end_idx = 4    # vel has 3 dims
-
-        def forward(self, feats, coors, adj_mat, edges=None):
-            """
-            Args:
-                feats: (B, N, in_dim) - features including [node_type(1), vel(3), acc(3), stress(1)]
-                coors: (B, N, 3) - current node coordinates
-                adj_mat: (B, N, N) or (N, N) - adjacency matrix
-            Returns:
-                pred_vel: (B, N, 3) - predicted velocity
-                pred_stress: (B, N, 1) - predicted stress
-                pred_coors: (B, N, 3) - predicted coordinates (coors + pred_vel)
-            """
-            B, N, _ = coors.shape
-            
-            # Extract initial velocity from features
-            v_init = feats[:, :, self.vel_init_start_idx:self.vel_init_end_idx]  # (B, N, 3)
-            
-            # Project features to hidden dimension and pass through EGNN
-            h = self.input_mlp(feats)  # (B, N, hidden_dim)
-            h, _ = self.egnn(h, coors, adj_mat=adj_mat, edges=edges, mask=None)
-            
-            # Compute messages m_ij for all pairs (we'll use only neighbors via adj_mat)
-            # For each node i, compute interaction with all neighbors j
-            # Expand h for pairwise computation
-            h_i = h.unsqueeze(2)  # (B, N, 1, hidden_dim)
-            h_j = h.unsqueeze(1)  # (B, 1, N, hidden_dim)
-            
-            # Compute relative positions and squared distances
-            coors_i = coors.unsqueeze(2)  # (B, N, 1, 3)
-            coors_j = coors.unsqueeze(1)  # (B, 1, N, 3)
-            rel_pos = coors_i - coors_j  # (B, N, N, 3)
-            sq_dist = torch.sum(rel_pos ** 2, dim=-1, keepdim=True)  # (B, N, N, 1)
-            
-            # Concatenate h_i, h_j, and squared distance to form input to φ_e
-            h_i_expanded = h_i.expand(-1, -1, N, -1)   # (B, N, N, hidden_dim)
-            h_j_expanded = h_j.expand(-1, N, -1, -1)   # (B, N, N, hidden_dim)
-            message_input = torch.cat([h_i_expanded, h_j_expanded, sq_dist], dim=-1)  # (B, N, N, 2*hidden_dim+1)
-
-            # m_ij = φ_e(h_i, h_j, ||x_i - x_j||^2, a_ij)
-            m_ij = self.phi_e(message_input)          # (B, N, N, hidden_dim)
-
-            # φ_x(m_ij) -> scalar per edge
-            phi_x_output = self.phi_x(m_ij).squeeze(-1)  # (B, N, N)
-            
-            # Apply adjacency mask (only consider neighbors)
-            if len(adj_mat.shape) == 2:
-                adj_mat = adj_mat.unsqueeze(0).expand(B, -1, -1)  # (B, N, N)
-            adj_mask = adj_mat.float()  # (B, N, N)
-            
-            # Mask out self-connections (j != i)
-            identity = torch.eye(N, device=adj_mat.device, dtype=torch.float32)
-            if len(identity.shape) == 2:
-                identity = identity.unsqueeze(0).expand(B, -1, -1)
-            adj_mask = adj_mask * (1 - identity)  # Remove self-connections
-            
-            # Compute neighbor interaction term: sum_j (x_i - x_j) * phi_x(m_ij)
-            # rel_pos: (B, N, N, 3), phi_x_output: (B, N, N)
-            phi_x_masked = phi_x_output.unsqueeze(-1) * adj_mask.unsqueeze(-1)  # (B, N, N, 1)
-            neighbor_term = torch.sum(rel_pos * phi_x_masked, dim=2)  # (B, N, 3)
-            
-            # Normalize neighbor_term by number of neighbors to prevent explosion
-            # Count neighbors per node
-            num_neighbors = adj_mask.sum(dim=2, keepdim=True)  # (B, N, 1)
-            num_neighbors = torch.clamp(num_neighbors, min=1.0)  # Avoid division by zero
-            neighbor_term = neighbor_term / num_neighbors  # Normalize by neighbor count
-            
-            # Compute scalar gate φ_v(h_i^l) (γ_i in Eq. (7))
-            # Add sigmoid to constrain gamma to [0, 1] to prevent velocity explosion
-            gamma = torch.sigmoid(self.phi_v(h))  # (B, N, 1) - now in [0, 1]
-
-            # Velocity prediction (Eq. (7)):
-            # v_i^{l+1} = φ_v(h_i^l) v_i^{init} + C ∑_{j≠i} (x_i^l - x_j^l) φ_x(m_ij)
-            # Further constrain neighbor_term by its magnitude to prevent explosion
-            neighbor_term_magnitude = torch.norm(neighbor_term, dim=-1, keepdim=True)  # (B, N, 1)
-            # Clamp neighbor_term magnitude to be at most 10x the typical velocity scale (1e-4)
-            max_neighbor_magnitude = 1e-3  # 10x typical velocity
-            neighbor_term_scale = torch.clamp(max_neighbor_magnitude / (neighbor_term_magnitude + 1e-8), max=1.0)
-            neighbor_term = neighbor_term * neighbor_term_scale
-            
-            pred_vel = gamma * v_init + self.C * neighbor_term   # (B, N, 3)
-            
-            # Final safety: clamp predicted velocity to reasonable range
-            # Typical velocities are ~1e-4, so clamp to [-1e-3, 1e-3] as safety
-            pred_vel = torch.clamp(pred_vel, min=-1e-3, max=1e-3)
-            
-            # Stress prediction from node embeddings
-            pred_stress = self.stress_head(h)
-            
-            # Coordinate prediction: x_i^{l+1} = x_i^l + v_i^{l+1}
-            pred_coors = coors + pred_vel
-            
-            return pred_vel, pred_stress, pred_coors
+# Import EGNN - use the correct implementation from myEGNN
+from EGNN import MeshEGNN
 
 
 class DeformingPlateDataset(Dataset):
     """Dataset for deforming plate trajectories."""
     
     def __init__(self, tfrecord_path, meta_path, num_trajectories=None, dataset_fraction=1.0, 
-                 stress_norm=None, velocity_norm=None, compute_norm_stats=True):
+                 norm_stats_path=None, compute_norm_stats=True):
+        """
+        Dataset for deforming plate trajectories with MeshGraphNet-style normalization.
+        
+        All inputs (positions, actuation) and targets (velocity, stress) are normalized
+        before being fed to the model. Denormalization happens only when saving predictions.
+        
+        Args:
+            tfrecord_path: Path to TFRecord file
+            meta_path: Path to meta.json
+            num_trajectories: Number of trajectories to load (None = use dataset_fraction)
+            dataset_fraction: Fraction of dataset to use (0.0 to 1.0)
+            norm_stats_path: Path to JSON file with normalization statistics (if None, compute)
+            compute_norm_stats: Whether to compute normalization statistics (if not loading from file)
+        """
         self.tfrecord_path = tfrecord_path
         self.meta_path = meta_path
         
@@ -212,9 +81,13 @@ class DeformingPlateDataset(Dataset):
         
         # Determine number of trajectories
         if num_trajectories is None:
-            # Estimate from dataset - typically 1000 for deforming_plate
-            estimated_total = 1000
-            num_trajectories = int(estimated_total * dataset_fraction)
+            if dataset_fraction is None:
+                # If both are None, default to 1 trajectory
+                num_trajectories = 1
+            else:
+                # Estimate from dataset - typically 1000 for deforming_plate
+                estimated_total = 1000
+                num_trajectories = int(estimated_total * dataset_fraction)
         
         self.requested_trajectories = max(1, num_trajectories)
         self.available_trajectories = self._count_available_trajectories(
@@ -237,23 +110,35 @@ class DeformingPlateDataset(Dataset):
         self.num_trajectories = min(self.requested_trajectories, self.available_trajectories)
         print(f"Loading {self.num_trajectories} trajectories from {tfrecord_path}")
         
-        # Normalization statistics
-        if stress_norm is not None and velocity_norm is not None:
-            self.stress_norm = stress_norm
-            self.velocity_norm = velocity_norm
+        # Load or compute normalization statistics
+        if norm_stats_path and os.path.exists(norm_stats_path):
+            print(f"Loading normalization statistics from: {norm_stats_path}")
+            self._load_norm_stats(norm_stats_path)
         elif compute_norm_stats:
             print("Computing normalization statistics...")
-            self.stress_norm, self.velocity_norm = self._compute_norm_stats()
-            print(f"  Stress normalization: {self.stress_norm:.6f}")
-            print(f"  Velocity normalization: {self.velocity_norm}")
+            self._compute_all_norm_stats()
+            print("Normalization statistics computed:")
+            print(f"  Position: mean={self.pos_mean.numpy()}, std={self.pos_std.numpy()}")
+            print(f"  Actuation: mean={self.act_mean.numpy()}, std={self.act_std.numpy()}")
+            print(f"  Velocity: std={self.vel_std:.6f} (scalar)")
+            print(f"  Stress: mean={self.stress_mean:.6f}, std={self.stress_std:.6f}")
         else:
-            # Default: no normalization
-            self.stress_norm = 1.0
-            self.velocity_norm = torch.ones(3)
+            # Default: no normalization (shouldn't be used in production)
+            self._init_default_norm_stats()
     
-    def _compute_norm_stats(self, sample_size=100):
-        """Compute mean stress and mean velocity per component for normalization."""
+    def _compute_all_norm_stats(self, sample_size=100):
+        """
+        Compute all normalization statistics following MeshGraphNet conventions.
+        
+        Computes:
+        - pos_mean, pos_std: Per-component mean/std of positions (3,)
+        - act_mean, act_std: Per-component mean/std of actuation (3,)
+        - vel_std: Scalar std of velocity magnitudes
+        - stress_mean, stress_std: Scalar mean/std of stress
+        """
         import numpy as np
+        all_positions = []
+        all_actuation = []
         all_stress = []
         all_velocity = []
         
@@ -263,32 +148,125 @@ class DeformingPlateDataset(Dataset):
             traj_dict = load_raw_trajectory_from_tfrecord(
                 self.tfrecord_path, self.meta, idx
             )
-            stress = traj_dict['stress']  # (T, N, 1)
             world_pos = traj_dict['world_pos']  # (T, N, 3)
+            stress = traj_dict['stress']  # (T, N, 1)
+            actuation = traj_dict.get('actuation', None)
             
-            # Compute velocity
+            # Collect positions (all timesteps)
+            all_positions.append(world_pos.reshape(-1, 3))  # (T*N, 3)
+            
+            # Collect actuation (if available)
+            if actuation is not None:
+                if len(actuation.shape) == 2:  # (N, 3) - static
+                    actuation = np.tile(actuation[np.newaxis, :, :], (world_pos.shape[0], 1, 1))
+                all_actuation.append(actuation.reshape(-1, 3))  # (T*N, 3)
+            
+            # Collect stress - only from timesteps where mean stress > threshold
+            # Only collect stress from timesteps where mean stress > 5000.0 (consistent with training threshold)
+            for t in range(len(stress)):
+                if stress[t].mean() > 5000.0:  # Only use high-stress timesteps
+                    all_stress.append(stress[t].flatten())
+            
+            # Compute velocity (exclude t=0)
             vel = np.zeros_like(world_pos)
             if len(world_pos) > 1:
                 vel[1:] = world_pos[1:] - world_pos[:-1]
+            all_velocity.append(vel[1:].reshape(-1, 3))  # Skip t=0
+        
+        # Concatenate all samples
+        all_positions = np.concatenate(all_positions, axis=0)  # (total_samples, 3)
+        # Concatenate all stress values (only from high-stress timesteps)
+        all_stress = np.concatenate(all_stress) if len(all_stress) > 0 else np.array([])  # (total_samples,) - only high-stress timesteps
+        all_velocity = np.concatenate(all_velocity, axis=0)  # (total_samples, 3)
+        
+        # Position normalization: per-component mean and std
+        self.pos_mean = torch.tensor(all_positions.mean(axis=0), dtype=torch.float32)  # (3,)
+        self.pos_std = torch.tensor(all_positions.std(axis=0), dtype=torch.float32)  # (3,)
+        # Avoid division by zero - use ddof=0 for population std (consistent with MeshGraphNet)
+        if self.pos_std.min() < 1e-8:
+            self.pos_std = torch.clamp(self.pos_std, min=1e-8)
+        
+        # Actuation normalization: per-component mean and std (or default if not available)
+        if len(all_actuation) > 0:
+            all_actuation = np.concatenate(all_actuation, axis=0)  # (total_samples, 3)
+            self.act_mean = torch.tensor(all_actuation.mean(axis=0), dtype=torch.float32)  # (3,)
+            self.act_std = torch.tensor(all_actuation.std(axis=0), dtype=torch.float32)  # (3,)
+            self.act_std = torch.clamp(self.act_std, min=1e-8)
+        else:
+            # Actuation not available - use default (zero mean, unit std)
+            self.act_mean = torch.zeros(3, dtype=torch.float32)
+            self.act_std = torch.ones(3, dtype=torch.float32)
+        
+        # Velocity normalization: scalar std of velocity magnitudes
+        velocity_magnitudes = np.linalg.norm(all_velocity, axis=1)  # (total_samples,)
+        # Use 75th percentile for robustness
+        vel_percentile = np.percentile(velocity_magnitudes, 75)
+        self.vel_std = float(max(vel_percentile, 1e-5))  # Scalar, minimum 1e-5
+        
+        # Stress normalization: scalar mean and std
+        # Only use stress from timesteps where mean stress > 5000.0 (consistent with training threshold)
+        # This focuses normalization on high-stress regions where the model needs to be accurate
+        if len(all_stress) > 0:
+            stress_nonzero = all_stress[all_stress > 100.0]
+            if len(stress_nonzero) > 0:
+                self.stress_mean = float(np.median(stress_nonzero))  # Use median instead of mean
+                self.stress_std = float(np.percentile(stress_nonzero, 75) - np.percentile(stress_nonzero, 25))  # IQR-based std
+            else:
+                self.stress_mean = 0.0
+                self.stress_std = 1.0
             
-            # Collect non-zero values (exclude boundary nodes if needed)
-            all_stress.append(stress.flatten())
-            all_velocity.append(vel.reshape(-1, 3))
+            # Compute statistics for debugging
+            print(f"Stress normalization computed from {len(all_stress)} samples (only timesteps with mean stress > 5000.0)")
+            print(f"  Stress mean: {self.stress_mean:.2f}")
+            print(f"  Stress std: {self.stress_std:.2f}")
+            print(f"  Stress min: {all_stress.min():.2f}, max: {all_stress.max():.2f}")
+        else:
+            # Fallback: no stress data found
+            print("  ⚠ WARNING: No stress values found! Using fallback normalization.")
+            self.stress_mean = 0.0
+            self.stress_std = 1.0
+        # Ensure mean is non-negative (stress is always >= 0)
+        if self.stress_mean < 0:
+            self.stress_mean = 0.0  # Safety: stress cannot be negative
+    
+    def _init_default_norm_stats(self):
+        """Initialize default normalization stats (no normalization)."""
+        self.pos_mean = torch.zeros(3, dtype=torch.float32)
+        self.pos_std = torch.ones(3, dtype=torch.float32)
+        self.act_mean = torch.zeros(3, dtype=torch.float32)
+        self.act_std = torch.ones(3, dtype=torch.float32)
+        self.vel_std = 1.0
+        self.stress_mean = 0.0
+        self.stress_std = 1.0
+    
+    def _load_norm_stats(self, norm_stats_path):
+        """Load normalization statistics from JSON file."""
+        with open(norm_stats_path, 'r') as f:
+            stats = json.load(f)
         
-        # Compute means
-        all_stress = np.concatenate(all_stress)
-        all_velocity = np.concatenate(all_velocity, axis=0)
-        
-        # Mean stress (absolute value to handle negative stresses)
-        stress_mean = np.abs(all_stress).mean()
-        if stress_mean < 1e-8:
-            stress_mean = 1.0  # Avoid division by zero
-        
-        # Mean velocity per component (absolute value)
-        velocity_mean = np.abs(all_velocity).mean(axis=0)  # (3,)
-        velocity_mean = np.clip(velocity_mean, 1e-8, None)  # Avoid division by zero
-        
-        return float(stress_mean), torch.tensor(velocity_mean, dtype=torch.float32)
+        self.pos_mean = torch.tensor(stats['pos_mean'], dtype=torch.float32)
+        self.pos_std = torch.tensor(stats['pos_std'], dtype=torch.float32)
+        self.act_mean = torch.tensor(stats['act_mean'], dtype=torch.float32)
+        self.act_std = torch.tensor(stats['act_std'], dtype=torch.float32)
+        self.vel_std = float(stats['vel_std'])
+        self.stress_mean = float(stats['stress_mean'])
+        self.stress_std = float(stats['stress_std'])
+    
+    def save_norm_stats(self, norm_stats_path):
+        """Save normalization statistics to JSON file."""
+        stats = {
+            'pos_mean': self.pos_mean.tolist(),
+            'pos_std': self.pos_std.tolist(),
+            'act_mean': self.act_mean.tolist(),
+            'act_std': self.act_std.tolist(),
+            'vel_std': self.vel_std,
+            'stress_mean': self.stress_mean,
+            'stress_std': self.stress_std
+        }
+        os.makedirs(os.path.dirname(norm_stats_path), exist_ok=True)
+        with open(norm_stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        print(f"Saved normalization statistics to: {norm_stats_path}")
     
     def _count_available_trajectories(self, max_count=None):
         """Count how many trajectories are in the TFRecord (up to max_count)."""
@@ -312,7 +290,22 @@ class DeformingPlateDataset(Dataset):
         return self.num_trajectories
     
     def __getitem__(self, idx):
-        """Load a trajectory and convert to EGNN format."""
+        """
+        Load a trajectory and convert to EGNN format with normalized inputs.
+        
+        CRITICAL: All inputs (positions, actuation) are normalized BEFORE being fed to the model.
+        Targets (velocity, stress) are returned in ORIGINAL scale (will be normalized in train_epoch).
+        
+        Returns:
+            Dictionary with:
+            - coors: (T, N, 3) - NORMALIZED node coordinates
+            - feats: (T, N, 8) - NORMALIZED input features [pos_norm(3), act_norm(3), node_type_one_hot(2)]
+            - adj_mat: (N, N) - adjacency matrix from mesh connectivity
+            - edge_index: (E, 2) - edge connectivity
+            - world_pos: (T, N, 3) - ORIGINAL world positions (for denormalization)
+            - target_vel: (T, N, 3) - ORIGINAL target velocity (will be normalized in train_epoch)
+            - target_stress: (T, N, 1) - ORIGINAL target stress (will be normalized in train_epoch)
+        """
         if idx >= self.available_trajectories:
             raise IndexError(
                 f"Trajectory index {idx} is out of range. "
@@ -322,48 +315,78 @@ class DeformingPlateDataset(Dataset):
             self.tfrecord_path, self.meta, idx
         )
         
-        coors_seq, feats_seq, edge_index = trajectory_to_egnn_inputs(traj_dict)
+        # Get original data
+        world_pos = torch.tensor(traj_dict['world_pos'], dtype=torch.float32)  # (T, N, 3) - ORIGINAL
+        actuation = traj_dict.get('actuation', None)
+        node_type = traj_dict['node_type']  # (N, 1)
+        cells = traj_dict['cells']  # (C, 4)
+        T, N, _ = world_pos.shape
         
-        # Normalize velocity in features (features contain: [node_type(1), vel(3), acc(3), stress(1)])
-        # Velocity is at indices 1:4, stress is at index 7
-        if feats_seq.shape[-1] >= 8:  # Ensure we have enough features
-            # Normalize velocity components (indices 1, 2, 3)
-            feats_seq[:, :, 1:4] = feats_seq[:, :, 1:4] / self.velocity_norm.unsqueeze(0).unsqueeze(0)  # (T, N, 3) / (1, 1, 3)
-            # Normalize stress (index 7)
-            feats_seq[:, :, 7:8] = feats_seq[:, :, 7:8] / self.stress_norm
+        # Handle actuation
+        if actuation is None:
+            actuation = np.zeros((T, N, 3), dtype=np.float32)
+        else:
+            actuation = np.array(actuation, dtype=np.float32)
+            if len(actuation.shape) == 2:  # (N, 3) - static
+                actuation = np.tile(actuation[np.newaxis, :, :], (T, 1, 1))
+        actuation = torch.tensor(actuation, dtype=torch.float32)  # (T, N, 3)
         
-        # Convert edge_index to adjacency matrix for EGNN
-        num_nodes = coors_seq.shape[1]
+        # NORMALIZE INPUTS: Positions and actuation
+        # Normalize positions: (pos - pos_mean) / pos_std
+        coors_normalized = (world_pos - self.pos_mean.unsqueeze(0).unsqueeze(0)) / self.pos_std.unsqueeze(0).unsqueeze(0)  # (T, N, 3)
+        
+        # Normalize actuation: (act - act_mean) / act_std
+        actuation_normalized = (actuation - self.act_mean.unsqueeze(0).unsqueeze(0)) / self.act_std.unsqueeze(0).unsqueeze(0)  # (T, N, 3)
+        
+        # Convert node_type to one-hot (not normalized)
+        # According to meshgraphnets/common.py NodeType enum:
+        # - NORMAL = 0 (plate nodes, where we compute loss)
+        # - OBSTACLE = 1 (boundary nodes, no loss)
+        # - HANDLE = 3 (actuator nodes, no loss)
+        # Encoding: 0 -> [0, 0] (NORMAL/plate), 1 -> [1, 0] (OBSTACLE), 3 -> [0, 1] (HANDLE)
+        # node_type == 0 (NORMAL) indicates nodes where we compute loss
+        # node_type == 1 (OBSTACLE) or 3 (HANDLE) are boundary/actuator nodes (fixed, no loss)
+        node_type_flat = node_type.flatten()  # (N,)
+        node_type_one_hot = np.zeros((N, 2), dtype=np.float32)
+        node_type_one_hot[node_type_flat == 0, :] = [0.0, 0.0]  # Type 0 -> [0, 0]
+        node_type_one_hot[node_type_flat == 1, :] = [1.0, 0.0]  # Type 1 (plate) -> [1, 0]
+        node_type_one_hot[node_type_flat == 3, :] = [0.0, 1.0]  # Type 3 -> [0, 1]
+        node_type_one_hot = torch.tensor(node_type_one_hot, dtype=torch.float32)  # (N, 2)
+        
+        # Construct NORMALIZED features: [pos_norm(3), act_norm(3), node_type_one_hot(2)]
+        feats_normalized = torch.cat([
+            coors_normalized,           # (T, N, 3) - normalized positions
+            actuation_normalized,       # (T, N, 3) - normalized actuation
+            node_type_one_hot.unsqueeze(0).expand(T, -1, -1)  # (T, N, 2) - node type (not normalized)
+        ], dim=-1)  # (T, N, 8)
+        
+        # Build edge connectivity
+        edge_index = build_edges_from_cells(cells, num_nodes=N)
+        num_nodes = coors_normalized.shape[1]
         adj_mat = torch.zeros(num_nodes, num_nodes, dtype=torch.bool)
         if edge_index.shape[0] == 2:  # (2, E) format
             adj_mat[edge_index[0], edge_index[1]] = True
         else:  # (E, 2) format
             adj_mat[edge_index[:, 0], edge_index[:, 1]] = True
+        adj_mat = adj_mat | adj_mat.t()  # Make symmetric
         
-        # Make symmetric (undirected graph)
-        adj_mat = adj_mat | adj_mat.t()
+        # Compute targets in ORIGINAL scale (will be normalized in train_epoch)
+        target_vel = compute_target_velocity(world_pos)  # (T, N, 3) - ORIGINAL
+        target_stress = torch.tensor(traj_dict['stress'], dtype=torch.float32)  # (T, N, 1) - ORIGINAL
         
-        # Compute target velocity and stress
-        world_pos = torch.tensor(traj_dict['world_pos'], dtype=torch.float32)
-        target_vel = compute_target_velocity(world_pos)
-        target_stress = torch.tensor(traj_dict['stress'], dtype=torch.float32)  # (T, N, 1)
-        
-        # Normalize stress and velocity
-        # Stress: divide by mean(stress)
-        target_stress = target_stress / self.stress_norm
-        
-        # Velocity: divide each component by mean(velocity) for that component
-        # velocity_norm is (3,) tensor
-        target_vel = target_vel / self.velocity_norm.unsqueeze(0).unsqueeze(0)  # (T, N, 3) / (1, 1, 3)
+        # Verify shapes
+        assert feats_normalized.shape[-1] == 8, f"Expected 8D features, got {feats_normalized.shape[-1]}D"
+        assert target_vel.shape == (T, N, 3), f"Target velocity shape mismatch: {target_vel.shape}"
+        assert target_stress.shape == (T, N, 1), f"Target stress shape mismatch: {target_stress.shape}"
         
         return {
-            'coors': coors_seq,      # (T, N, 3)
-            'feats': feats_seq,      # (T, N, feat_dim)
-            'adj_mat': adj_mat,      # (N, N)
-            'edge_index': edge_index, # (2, E) or (E, 2)
-            'world_pos': world_pos,  # (T, N, 3)
-            'target_vel': target_vel,  # (T, N, 3) - NORMALIZED
-            'target_stress': target_stress  # (T, N, 1) - NORMALIZED
+            'coors': coors_normalized,      # (T, N, 3) - NORMALIZED coordinates
+            'feats': feats_normalized,      # (T, N, 8) - NORMALIZED features [pos_norm(3), act_norm(3), node_type(2)]
+            'adj_mat': adj_mat,             # (N, N) - adjacency matrix
+            'edge_index': edge_index,       # (E, 2) - edge connectivity
+            'world_pos': world_pos,         # (T, N, 3) - ORIGINAL positions (for denormalization)
+            'target_vel': target_vel,       # (T, N, 3) - ORIGINAL velocity (will be normalized in train_epoch)
+            'target_stress': target_stress  # (T, N, 1) - ORIGINAL stress (will be normalized in train_epoch)
         }
 
 
@@ -388,33 +411,36 @@ def compute_target_stress(stress_array):
     return torch.tensor(stress_array, dtype=torch.float32)
 
 
-def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectories=None, 
-                     stress_norm=None, velocity_norm=None):
+def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, num_trajectories=None, max_timesteps=None, use_autoregressive=True):
     """
     Save predictions and ground truth values for a subset of trajectories.
     
+    CRITICAL: Model outputs are in NORMALIZED space. This function DENORMALIZES them
+    before saving. Targets are in ORIGINAL scale and are saved as-is.
+    
     Args:
-        stress_norm: Normalization factor for stress (to denormalize predictions)
-        velocity_norm: Normalization factors for velocity per component (to denormalize predictions)
+        model: Trained model (outputs normalized predictions)
+        dataloader: DataLoader with normalized inputs
+        device: Device to run inference on
+        save_dir: Directory to save predictions
+        epoch: Current epoch number
+        dataset: Dataset object (needed for normalization constants)
+        num_trajectories: Number of trajectories to save (None = all)
+        max_timesteps: Maximum number of timesteps to predict (None = all timesteps)
+        use_autoregressive: If True, use autoregressive prediction (no teacher forcing).
+                          If False, use teacher forcing (ground truth positions).
     """
     model.eval()
     
-    # Get normalization factors from dataloader if not provided
-    if stress_norm is None or velocity_norm is None:
-        dataset = dataloader.dataset
-        if hasattr(dataset, 'stress_norm') and hasattr(dataset, 'velocity_norm'):
-            stress_norm = dataset.stress_norm
-            velocity_norm = dataset.velocity_norm
-        else:
-            # No normalization
-            stress_norm = 1.0
-            velocity_norm = torch.ones(3)
+    if dataset is None:
+        raise ValueError("dataset must be provided to save_predictions for denormalization")
     
-    # Convert velocity_norm to tensor if needed
-    if isinstance(velocity_norm, (list, np.ndarray)):
-        velocity_norm = torch.tensor(velocity_norm, dtype=torch.float32)
-    if not isinstance(velocity_norm, torch.Tensor):
-        velocity_norm = torch.ones(3) * velocity_norm
+    # Get normalization constants and move to device
+    pos_mean = dataset.pos_mean.to(device)  # (3,)
+    pos_std = dataset.pos_std.to(device)    # (3,)
+    vel_std = torch.tensor(dataset.vel_std, device=device, dtype=torch.float32)  # scalar
+    stress_mean = torch.tensor(dataset.stress_mean, device=device, dtype=torch.float32)  # scalar
+    stress_std = torch.tensor(dataset.stress_std, device=device, dtype=torch.float32)  # scalar
     
     all_pred_vel = []
     all_pred_stress = []
@@ -431,12 +457,12 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
             if num_trajectories is not None and traj_idx >= num_trajectories:
                 break
                 
-            coors_seq = batch['coors'].to(device)
-            feats_seq = batch['feats'].to(device)
+            coors_seq = batch['coors'].to(device)  # (T, N, 3) - NORMALIZED
+            feats_seq = batch['feats'].to(device)  # (T, N, 8) - NORMALIZED
             adj_mat = batch['adj_mat'].to(device)
-            target_vel = batch['target_vel'].to(device)
-            target_stress = batch['target_stress'].to(device)
-            world_pos = batch.get('world_pos')
+            target_vel = batch['target_vel'].to(device)  # (T, N, 3) - ORIGINAL
+            target_stress = batch['target_stress'].to(device)  # (T, N, 1) - ORIGINAL
+            world_pos = batch.get('world_pos')  # (T, N, 3) - ORIGINAL
             if world_pos is None:
                 raise KeyError(
                     "Batch is missing 'world_pos'. Ensure the dataset returns world positions."
@@ -454,6 +480,9 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
             
             B, T, N, _ = coors_seq.shape
             
+            # Determine end timestep: use max_timesteps if provided
+            end_t = T if max_timesteps is None else min(T, max_timesteps)
+            
             traj_pred_vel = []
             traj_pred_stress = []
             traj_pred_pos = []
@@ -461,62 +490,108 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
             traj_true_stress = []
             traj_true_pos = []
             
-            # Process each timestep (starting from t=1)
-            # AUTOREGRESSIVE: Use model's own predictions from previous timestep
-            # Start with ground truth at t=0, then use predictions for subsequent steps
-            coors_prev_pred = coors_seq[:, 0].to(device)  # Start with ground truth at t=0
-            feats_prev_pred = feats_seq[:, 0].to(device)  # Start with ground truth at t=0
-            pred_vel_prev = torch.zeros_like(coors_prev_pred).to(device)  # Previous predicted velocity (for acceleration)
+            # Initialize autoregressive state: start from t=0 ground truth
+            # For autoregressive prediction, we'll update positions and features at each step
+            if use_autoregressive:
+                # Start with t=0 ground truth (normalized)
+                current_coors_norm = coors_seq[:, 0].clone()  # (B, N, 3) - NORMALIZED
+                current_feats_norm = feats_seq[:, 0].clone()  # (B, N, 8) - NORMALIZED
+                # Features contain: [pos_norm(3), act_norm(3), node_type_one_hot(2)]
+                # We'll update the position part (first 3 dims) at each step
+                print(f"  Using AUTOREGRESSIVE prediction (no teacher forcing) for timesteps 1 to {end_t-1}")
+            else:
+                print(f"  Using TEACHER FORCING (ground truth positions) for timesteps 1 to {end_t-1}")
             
-            for t in range(1, T):
-                # Use MODEL'S PREDICTIONS from previous timestep (autoregressive)
-                coors_prev = coors_prev_pred  # Use predicted coordinates from t-1
-                feats_prev = feats_prev_pred  # Use predicted features from t-1
+            # Process each timestep (starting from t=1)
+            # Note: In autoregressive mode, we predict all timesteps regardless of stress threshold
+            # This allows us to see predictions even on early timesteps with low stress
+            for t in range(1, end_t):
                 adj_mat_t = adj_mat
-                target_vel_t = target_vel[:, t]
-                target_stress_t = target_stress[:, t]
-                target_pos_t = world_pos[:, t]
+                target_vel_t = target_vel[:, t]  # (B, N, 3) - ORIGINAL
+                target_stress_t = target_stress[:, t]  # (B, N, 1) - ORIGINAL
+                target_pos_t = world_pos[:, t]  # (B, N, 3) - ORIGINAL
                 
-                # Forward pass
-                # Returns: (pred_vel, pred_stress, pred_coors) where:
-                #   pred_vel follows: v_i^{l+1} = phi_v(h_i^l) * v_i^init + C * sum_j (x_i - x_j) * phi_x(m_ij)
-                #   pred_coors = coors_prev + pred_vel
-                pred_vel, pred_stress, pred_coors = model(feats_prev, coors_prev, adj_mat_t)
+                if use_autoregressive:
+                    # AUTOREGRESSIVE: Use predicted positions from previous step
+                    coors_prev_norm = current_coors_norm  # (B, N, 3) - predicted from previous step
+                    feats_prev_norm = current_feats_norm  # (B, N, 8) - updated from previous step
+                else:
+                    # TEACHER FORCING: Use ground truth positions and features
+                    coors_prev_norm = coors_seq[:, t-1]  # (B, N, 3) - NORMALIZED
+                    feats_prev_norm = feats_seq[:, t-1]   # (B, N, 8) - NORMALIZED
                 
-                # Update features for next timestep based on predictions
-                # Features: [node_type(1), vel(3), acc(3), stress(1)]
-                node_type_feat = feats_prev[:, :, 0:1]  # Keep node_type unchanged (B, N, 1)
-                pred_vel_normalized = pred_vel  # Already normalized
-                # Compute acceleration: acc = vel_current - vel_previous
-                pred_acc = pred_vel - pred_vel_prev  # (B, N, 3)
-                pred_stress_normalized = pred_stress  # Already normalized
+                # Forward pass: model outputs NORMALIZED predictions (should be masked for non-NORMAL nodes)
+                pred_vel_norm, pred_stress_norm = model(feats_prev_norm, coors_prev_norm, adj_mat_t, v_init=None)
                 
-                # Reconstruct features for next timestep
-                # Detach from computation graph (we're in eval mode, but good practice)
-                feats_prev_pred = torch.cat([
-                    node_type_feat,               # (B, N, 1)
-                    pred_vel_normalized.detach(), # (B, N, 3) - detach for next step
-                    pred_acc.detach(),            # (B, N, 3) - detach for next step
-                    pred_stress_normalized.detach() # (B, N, 1) - detach for next step
-                ], dim=-1)  # (B, N, 8)
+                # Verify masking is working - check non-NORMAL nodes have zero predictions
+                node_type_one_hot_check = feats_prev_norm[:, :, 6:8]  # (B, N, 2)
+                tolerance = 1e-6
+                normal_mask_check = ((node_type_one_hot_check[:, :, 0].abs() < tolerance) & 
+                                    (node_type_one_hot_check[:, :, 1].abs() < tolerance)).float()  # (B, N)
+                non_normal_mask_check = 1.0 - normal_mask_check  # (B, N)
                 
-                # Update for next timestep (detach to prevent gradient flow)
-                coors_prev_pred = pred_coors.detach()  # Use predicted coordinates (detached)
-                pred_vel_prev = pred_vel.detach()  # Store for next acceleration computation (detached)
+                if non_normal_mask_check.sum().item() > 0:  # If there are non-NORMAL nodes
+                    pred_stress_non_normal = pred_stress_norm.squeeze(-1)[non_normal_mask_check > 0.5]  # (num_non_normal,)
+                    if pred_stress_non_normal.numel() > 0:
+                        max_non_normal = pred_stress_non_normal.abs().max().item()
+                        if max_non_normal > 1e-5:  # Should be essentially zero
+                            # Force to zero as a safeguard
+                            pred_stress_norm = pred_stress_norm * normal_mask_check.unsqueeze(-1)
+                            pred_vel_norm = pred_vel_norm * normal_mask_check.unsqueeze(-1).unsqueeze(-1)
                 
-                # Denormalize predictions and targets before saving
-                # Predictions are in normalized space, need to convert back
-                pred_vel_denorm = pred_vel.cpu() * velocity_norm.unsqueeze(0).unsqueeze(0)  # (B, N, 3)
-                pred_stress_denorm = pred_stress.cpu() * stress_norm
-                target_vel_denorm = target_vel_t.cpu() * velocity_norm.unsqueeze(0).unsqueeze(0)  # (B, N, 3)
-                target_stress_denorm = target_stress_t.cpu() * stress_norm
                 
-                # Convert to numpy and store (denormalized values)
-                traj_pred_vel.append(pred_vel_denorm.numpy())
-                traj_pred_stress.append(pred_stress_denorm.numpy())
-                traj_pred_pos.append(pred_coors.cpu().numpy())
-                traj_true_vel.append(target_vel_denorm.numpy())
-                traj_true_stress.append(target_stress_denorm.numpy())
+                # DENORMALIZE predictions for saving
+                # CRITICAL: Extract node_type to mask non-NORMAL nodes after denormalization
+                # The model should already mask predictions, but we double-check here for safety
+                node_type_one_hot = feats_prev_norm[:, :, 6:8]  # (B, N, 2)
+                tolerance = 1e-6
+                normal_node_mask = ((node_type_one_hot[:, :, 0].abs() < tolerance) & 
+                                   (node_type_one_hot[:, :, 1].abs() < tolerance)).float()  # (B, N)
+                normal_node_mask = normal_node_mask.unsqueeze(-1)  # (B, N, 1) for broadcasting
+                
+                # Velocity: v = v_norm * vel_std
+                pred_vel_denorm = pred_vel_norm * vel_std  # (B, N, 3)
+                # Ensure non-NORMAL nodes have zero velocity
+                pred_vel_denorm = pred_vel_denorm * normal_node_mask  # (B, N, 3)
+                
+                # Stress: s = s_norm * stress_std + stress_mean
+                # CRITICAL FIX: For non-NORMAL nodes, pred_stress_norm should be 0, but if it's not,
+                # we need to mask after denormalization to prevent stress_mean from being added
+                # Only denormalize for NORMAL nodes, set to 0 for others
+                pred_stress_denorm = torch.where(
+                    normal_node_mask > 0.5,  # If NORMAL node
+                    pred_stress_norm * stress_std + stress_mean,  # Denormalize
+                    torch.zeros_like(pred_stress_norm)  # Set to 0 for non-NORMAL nodes
+                )  # (B, N, 1)
+                pred_stress_denorm = torch.clamp(pred_stress_denorm, min=0.0)  # Ensure stress >= 0 (von Mises stress)
+                pred_stress_denorm = pred_stress_denorm.unsqueeze(-1)  # (B, N, 1)
+                
+                
+                # Denormalize positions for computing predicted coordinates
+                # coors_prev_norm is normalized, so: pos_prev = coors_prev_norm * pos_std + pos_mean
+                pos_prev_denorm = coors_prev_norm * pos_std.unsqueeze(0).unsqueeze(0) + pos_mean.unsqueeze(0).unsqueeze(0)  # (B, N, 3)
+                
+                # Compute predicted coordinates: pos_pred = pos_prev + vel_pred
+                pred_pos_denorm = pos_prev_denorm + pred_vel_denorm  # (B, N, 3)
+                
+                # AUTOREGRESSIVE UPDATE: Update state for next timestep
+                if use_autoregressive and t < end_t - 1:  # Don't update on last timestep
+                    # Update normalized coordinates for next step
+                    current_coors_norm = (pred_pos_denorm - pos_mean.unsqueeze(0).unsqueeze(0)) / pos_std.unsqueeze(0).unsqueeze(0)  # (B, N, 3)
+                    
+                    # Update features: [pos_norm(3), act_norm(3), node_type_one_hot(2)]
+                    # Update position part (first 3 dims) with new predicted positions
+                    # Keep actuation (dims 3:6) and node_type (dims 6:8) unchanged
+                    current_feats_norm = current_feats_norm.clone()  # (B, N, 8)
+                    current_feats_norm[:, :, 0:3] = current_coors_norm  # Update position part
+                    # Actuation and node_type remain the same (they're static or from t=0)
+                
+                # Convert to numpy and store (all in ORIGINAL scale)
+                traj_pred_vel.append(pred_vel_denorm.cpu().numpy())
+                traj_pred_stress.append(pred_stress_denorm.cpu().numpy())
+                traj_pred_pos.append(pred_pos_denorm.cpu().numpy())
+                traj_true_vel.append(target_vel_t.cpu().numpy())
+                traj_true_stress.append(target_stress_t.cpu().numpy())
                 traj_true_pos.append(target_pos_t.cpu().numpy())
             
             # Stack timesteps
@@ -569,7 +644,7 @@ def save_predictions(model, dataloader, device, save_dir, epoch, num_trajectorie
     model.train()  # Set back to training mode
 
 
-def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weight=2.0):
+def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weight=1.0, dataset=None, use_adaptive_scaling=False, max_timesteps=None, min_stress_threshold=5000.0, warmup_fraction=0.025):
     """
     Train for one epoch.
     
@@ -577,13 +652,22 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
         velocity_loss_weight: Weight for velocity loss to balance with stress loss.
                              Since velocity values are ~0.0002 and stress ~18000,
                              we need a large weight to balance the losses.
+                             Only used if use_adaptive_scaling=False.
+        use_adaptive_scaling: If True, use adaptive loss scaling with EMA instead of fixed weight.
     """
     model.train()
     total_loss = 0.0
     total_loss_vel = 0.0
     total_loss_stress = 0.0
-    total_loss_pos = 0.0
     num_samples = 0
+    
+    # Initialize adaptive scaling parameters (using EMA with momentum=0.99)
+    if use_adaptive_scaling:
+        if not hasattr(model, 'vel_loss_scale'):
+            model.vel_loss_scale = 1.0
+        if not hasattr(model, 'stress_loss_scale'):
+            model.stress_loss_scale = 1.0
+        ema_momentum = 0.99  # Smooth updates
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
     for batch_idx, batch in enumerate(pbar):
@@ -608,116 +692,324 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
         epoch_loss_batch = 0.0
         epoch_loss_vel_batch = 0.0
         epoch_loss_stress_batch = 0.0
-        epoch_loss_pos_batch = 0.0
         
-        # Process each timestep (starting from t=1 since we need previous position for velocity)
-        # AUTOREGRESSIVE: Use model's own predictions from previous timestep
-        # Start with ground truth at t=0, then use predictions for subsequent steps
-        coors_prev_pred = coors_seq[:, 0]  # Start with ground truth at t=0
-        feats_prev_pred = feats_seq[:, 0]  # Start with ground truth at t=0
-        pred_vel_prev = torch.zeros_like(coors_prev_pred)  # Previous predicted velocity (for acceleration)
         
-        for t in range(1, T):
-            # Use MODEL'S PREDICTIONS from previous timestep (autoregressive)
-            coors_prev = coors_prev_pred  # Use predicted coordinates from t-1
-            feats_prev = feats_prev_pred  # Use predicted features from t-1
-            adj_mat_t = adj_mat            # (B, N, N) or (N, N)
-            target_vel_t = target_vel[:, t]  # (B, N, 3)
-            target_stress_t = target_stress[:, t]  # (B, N, 1)
+        # Process each timestep (starting from t=1)
+        # TEACHER FORCING: Use ground truth positions at each timestep (not autoregressive)
+        # This allows the model to learn single-step predictions correctly
+        
+        # CRITICAL FIX: Skip early timesteps and only train on high-stress timesteps
+        # This prevents the model from learning to predict zero stress
+        # These are now configurable via command-line arguments
+        WARMUP_FRACTION = warmup_fraction  # Skip first fraction of trajectory (default: 2.5%)
+        MIN_STRESS_THRESHOLD = min_stress_threshold  # Only train on timesteps with mean stress > threshold
+        
+        optimizer.zero_grad()
+        
+        valid_timesteps = 0  # Count timesteps with meaningful targets
+        skipped_low_stress = 0  # Count timesteps skipped due to low stress
+        
+        # Determine end timestep: use max_timesteps if provided, otherwise use all timesteps
+        end_t = T if max_timesteps is None else min(T, max_timesteps)
+        
+        # Start from warmup fraction to skip early timesteps where stress is near-zero
+        # But adjust warmup if max_timesteps is too small to ensure we have valid timesteps
+        if max_timesteps is not None and max_timesteps < T:
+            # If max_timesteps is small, reduce warmup proportionally
+            # Calculate warmup based on max_timesteps, not full trajectory length
+            warmup_timesteps = max(0, int(max_timesteps * warmup_fraction))
+            start_t = max(1, warmup_timesteps)
+            # Ensure we have at least 1 timestep to train on
+            if start_t >= end_t:
+                # If warmup would eliminate all timesteps, start from t=1
+                start_t = 1
+        else:
+            # Normal case: use full trajectory warmup
+            start_t = max(1, int(T * warmup_fraction))
+        
+        # Final check: ensure we have valid timesteps
+        if end_t <= start_t:
+            if batch_idx == 0:
+                print(f"\n⚠ ERROR: Invalid timestep range!")
+                print(f"  start_t={start_t}, end_t={end_t}")
+                print(f"  max_timesteps={max_timesteps} is too small!")
+                print(f"  Need at least {start_t + 1} timesteps. Increase --max_timesteps to at least {start_t + 1}")
+            # Set end_t to start_t + 1 as a fallback, but this will likely skip all timesteps due to stress threshold
+            end_t = start_t + 1
+        
+        if batch_idx == 0 and epoch == 0:  # Only print once at start
+            print(f"Training on timesteps: {start_t} to {end_t-1} (min stress threshold: {MIN_STRESS_THRESHOLD:.1f})")
+        
+        for t in range(start_t, end_t):
+            # TEACHER FORCING: Use ground truth positions and features at time t-1
+            # This is the correct approach for learning single-step predictions
+            coors_t_minus_1 = coors_seq[:, t-1]  # Ground truth positions at t-1
+            feats_t_minus_1 = feats_seq[:, t-1]   # Ground truth features at t-1
+            adj_mat_t = adj_mat
             
-            # Forward pass
-            optimizer.zero_grad()
+            # Extract node type for masking (indices 6:8 are node_type_one_hot)
+            # According to meshgraphnets/common.py: NORMAL=0, OBSTACLE=1, HANDLE=3
+            # Encoding: 0 (NORMAL) -> [0, 0], 1 (OBSTACLE) -> [1, 0], 3 (HANDLE) -> [0, 1]
+            node_type_one_hot = feats_t_minus_1[:, :, 6:8]  # (B, N, 2)
             
-            # Model expects: feats (B, N, feat_dim), coors (B, N, 3), adj_mat (B, N, N)
-            # Returns: (pred_vel, pred_stress, pred_coors) where:
-            #   pred_vel follows: v_i^{l+1} = phi_v(h_i^l) * v_i^init + C * sum_j (x_i - x_j) * phi_x(m_ij)
-            #   pred_coors = coors_prev + pred_vel
-            pred_vel, pred_stress, pred_coors = model(feats_prev, coors_prev, adj_mat_t)
+            # Targets at time t
+            target_vel_t = target_vel[:, t]      # Velocity at time t
+            target_stress_t = target_stress[:, t]  # Stress at time t
             
-            # Extract node_type from features (first dimension, index 0)
-            # node_type is stored as float in features: [node_type(1), vel(3), acc(3), stress(1)]
-            # node_type values: typically 0=boundary, 1=normal, 2=inflow, 3=outflow, etc.
-            node_type_for_mask = feats_prev[:, :, 0]  # (B, N) - for loss masking
+            # Check if this timestep has significant stress
+            # Skip timesteps with low stress - nothing interesting happening yet
+            # CRITICAL: Only check stress on NORMAL nodes (node_type == 0)
+            # Non-NORMAL nodes should have zero stress, so including them would skew the mean
+            stress_mask = ((node_type_one_hot[:, :, 0].abs() < 1e-6) & (node_type_one_hot[:, :, 1].abs() < 1e-6)).float()  # (B, N)
+            if stress_mask.sum() > 0:
+                mean_stress = (target_stress_t.squeeze(-1).abs() * stress_mask).sum().item() / (stress_mask.sum().item() + 1e-8)
+            else:
+                mean_stress = 0.0
             
-            # Update features for next timestep based on predictions
-            # Features: [node_type(1), vel(3), acc(3), stress(1)]
-            node_type_feat = feats_prev[:, :, 0:1]  # Keep node_type unchanged (B, N, 1)
-            pred_vel_normalized = pred_vel  # Already normalized
-            # Compute acceleration: acc = vel_current - vel_previous
-            pred_acc = pred_vel - pred_vel_prev  # (B, N, 3)
-            pred_stress_normalized = pred_stress  # Already normalized
+            if mean_stress < MIN_STRESS_THRESHOLD:
+                # Skip timesteps with low stress - avoid learning to predict zeros
+                skipped_low_stress += 1
+                # Warn if we're skipping all timesteps due to stress threshold
+                if batch_idx == 0 and valid_timesteps == 0 and t == end_t - 1:
+                    print(f"  ⚠ All timesteps have stress < {MIN_STRESS_THRESHOLD} - no training data")
+                continue
             
-            # Reconstruct features for next timestep
-            # Detach from computation graph to prevent gradients flowing through entire sequence
-            # This is standard for autoregressive training to avoid exploding gradients
-            feats_prev_pred = torch.cat([
-                node_type_feat,               # (B, N, 1)
-                pred_vel_normalized.detach(), # (B, N, 3) - detach for next step
-                pred_acc.detach(),            # (B, N, 3) - detach for next step
-                pred_stress_normalized.detach() # (B, N, 1) - detach for next step
-            ], dim=-1)  # (B, N, 8)
+            valid_timesteps += 1
             
-            # Update for next timestep (detach to prevent gradient flow)
-            coors_prev_pred = pred_coors.detach()  # Use predicted coordinates (detached)
-            pred_vel_prev = pred_vel.detach()  # Store for next acceleration computation (detached)
-            # Create mask for node_type == 1 (normal nodes only)
-            # Loss is computed only on normal nodes, excluding boundary and special nodes
-            node_mask = (node_type_for_mask == 1.0).float()  # (B, N)
+            # Forward pass: predict velocity and stress at time t given state at t-1
+            # CRITICAL: Model receives NORMALIZED inputs (feats, coors) and outputs NORMALIZED predictions
+            # Inputs are already normalized in __getitem__, so model operates in normalized space
+            # Model outputs are in normalized space: pred_vel_norm, pred_stress_norm
+            pred_vel_norm, pred_stress_norm = model(feats_t_minus_1, coors_t_minus_1, adj_mat_t, v_init=None)
             
-            # Compute losses with weighting
-            # Note: Both pred_vel and target_vel_t are normalized (divided by mean velocity per component)
-            # Both pred_stress and target_stress_t are normalized (divided by mean stress)
-            # So we can compute loss directly on normalized values
+            # Check for NaN in predictions
+            if torch.isnan(pred_vel_norm).any() or torch.isnan(pred_stress_norm).any():
+                continue
             
-            # Velocity loss: compute per-node, then mask and average
-            # Use normalized velocities directly (no additional scaling needed)
-            vel_error = (pred_vel - target_vel_t) ** 2  # (B, N, 3)
+            # stress_mask already created above for threshold check
+            # Use the same mask for both velocity and stress loss (node_type == 0 only)
+            node_mask = stress_mask  # Same mask for both losses
+            mask_sum = node_mask.sum().item()
+            if mask_sum < 1.0:
+                # Mask is invalid (0 nodes), this indicates node_type encoding issue
+                print(f"  ⚠ WARNING: Invalid node mask (sum={mask_sum:.6f}), expected node_type==0 for loss computation")
+                # Fallback: use all nodes if mask is completely wrong
+                stress_mask = torch.ones_like(node_mask)
+                node_mask = stress_mask
+            
+            # NORMALIZE TARGETS: Targets come in original scale, normalize them for loss computation
+            # This ensures loss is computed in normalized space (O(1) magnitudes)
+            if dataset is not None:
+                # Move normalization constants to device
+                vel_std = torch.tensor(dataset.vel_std, device=device, dtype=torch.float32)
+                stress_mean = torch.tensor(dataset.stress_mean, device=device, dtype=torch.float32)
+                stress_std = torch.tensor(dataset.stress_std, device=device, dtype=torch.float32)
+                
+                # Normalize targets: v_norm = v / vel_std, s_norm = (s - stress_mean) / stress_std
+                target_vel_t_norm = target_vel_t / vel_std  # (B, N, 3)
+                target_stress_t_norm = (target_stress_t.squeeze(-1) - stress_mean) / stress_std  # (B, N)
+            else:
+                # Fallback: no normalization (shouldn't happen)
+                target_vel_t_norm = target_vel_t
+                target_stress_t_norm = target_stress_t.squeeze(-1)
+            
+            
+            # Velocity loss: compute per-node, then mask and average (on NORMALIZED values)
+            # Both predictions and targets are in normalized space (O(1) magnitudes)
+            vel_error = (pred_vel_norm - target_vel_t_norm) ** 2  # (B, N, 3)
             vel_error_per_node = torch.sum(vel_error, dim=-1)  # (B, N)
             vel_error_masked = vel_error_per_node * node_mask  # (B, N)
             loss_vel = vel_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
             
-            # Diagnostic: check if velocities are in correct range (for debugging)
-            # This helps identify if the model is learning correct scale
-            if batch_idx == 0 and t == 1:  # Print once per epoch
-                pred_vel_mag = torch.norm(pred_vel, dim=-1).mean().item()
-                target_vel_mag = torch.norm(target_vel_t, dim=-1).mean().item()
-                if pred_vel_mag > 10 * target_vel_mag and target_vel_mag > 0:
-                    print(f"  ⚠ WARNING: Predicted velocity magnitude ({pred_vel_mag:.6f}) is {pred_vel_mag/target_vel_mag:.1f}x larger than target ({target_vel_mag:.6f})")
+            # Stress loss: compute per-node, then mask and average (on NORMALIZED values)
+            # CRITICAL FIX: Use stress_mask (node_type == 0) for loss computation
+            # Both velocity and stress loss are computed on node_type == 0 only
+            # Boundary/actuator nodes (node_type == 1 or 3) are fixed and should not contribute to loss
+            stress_error = (pred_stress_norm.squeeze(-1) - target_stress_t_norm) ** 2  # (B, N) - ensure shapes match
+            stress_error_masked = stress_error * stress_mask  # (B, N) - use NORMAL nodes (node_type == 0)
+            loss_stress = stress_error_masked.sum() / (stress_mask.sum() + 1e-8)  # Average over plate nodes
             
-            # Stress loss: compute per-node, then mask and average
-            stress_error = (pred_stress.squeeze(-1) - target_stress_t.squeeze(-1)) ** 2  # (B, N)
-            stress_error_masked = stress_error * node_mask  # (B, N)
-            loss_stress = stress_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
+            # CRITICAL DEBUG: Check if stress predictions are uniform BEFORE computing loss
+            if batch_idx == 0 and valid_timesteps == 1:
+                pred_stress_flat = pred_stress_norm.squeeze(-1)  # (B, N)
+                pred_stress_std_all = pred_stress_flat.std().item()
+                pred_stress_range_all = pred_stress_flat.max().item() - pred_stress_flat.min().item()
+                
+                if pred_stress_std_all < 0.01:
+                    print(f"  ⚠ CRITICAL: Stress predictions are UNIFORM across ALL nodes!")
+                    print(f"     std={pred_stress_std_all:.8f}, range={pred_stress_range_all:.8f}")
+                    print(f"     mean={pred_stress_flat.mean().item():.6f}")
+                    print(f"     This means the stress head is outputting the same value for all nodes!")
+                    print(f"     Possible causes: vanishing gradients, dead ReLU, or initialization issue.")
+            
+            # CRITICAL DEBUG: Check stress predictions vs targets in normalized space
+            if batch_idx == 0 and valid_timesteps == 1:
+                pred_stress_norm_masked = pred_stress_norm.squeeze(-1)[stress_mask > 0]  # (num_masked,)
+                target_stress_norm_masked = target_stress_t_norm[stress_mask > 0]  # (num_masked,)
+                
+                
+                if pred_stress_norm_masked.numel() > 0:
+                    print(f"\n  === STRESS DEBUG (t={t}, Normalized Space) ===")
+                    print(f"  Normalization: mean={dataset.stress_mean:.2f}, std={dataset.stress_std:.2f}")
+                    print(f"  Predicted stress (normalized, NORMAL nodes only):")
+                    print(f"    min={pred_stress_norm_masked.min().item():.6f}, max={pred_stress_norm_masked.max().item():.6f}")
+                    print(f"    mean={pred_stress_norm_masked.mean().item():.6f}, std={pred_stress_norm_masked.std().item():.6f}")
+                    print(f"  Target stress (normalized, NORMAL nodes only):")
+                    print(f"    min={target_stress_norm_masked.min().item():.6f}, max={target_stress_norm_masked.max().item():.6f}")
+                    print(f"    mean={target_stress_norm_masked.mean().item():.6f}, std={target_stress_norm_masked.std().item():.6f}")
+                    
+                    # Check if predictions are uniform
+                    pred_std = pred_stress_norm_masked.std().item()
+                    target_std = target_stress_norm_masked.std().item()
+                    pred_mean = pred_stress_norm_masked.mean().item()
+                    target_mean = target_stress_norm_masked.mean().item()
+                    
+                    if pred_std < 0.01 * abs(pred_mean):
+                        print(f"  ⚠ CRITICAL: Predictions are UNIFORM! std={pred_std:.8f}, mean={pred_mean:.6f}")
+                        print(f"     Model is predicting the same value ({pred_mean:.6f}) for all nodes!")
+                    
+                    # Check prediction vs target statistics
+                    pred_target_diff = (pred_stress_norm_masked - target_stress_norm_masked).abs()
+                    mean_error = pred_target_diff.mean().item()
+                    max_error = pred_target_diff.max().item()
+                    print(f"  Prediction error (normalized):")
+                    print(f"    mean_abs_error={mean_error:.6f}, max_abs_error={max_error:.6f}")
+                    print(f"    RMSE={torch.sqrt((pred_stress_norm_masked - target_stress_norm_masked).pow(2).mean()).item():.6f}")
+                    print(f"    Target std={target_std:.6f}, Pred std={pred_std:.6f}")
+                    if pred_std < 0.1 * target_std:
+                        print(f"    ⚠ WARNING: Prediction std is {target_std/pred_std:.1f}x smaller than target std!")
+                        print(f"       Model is not learning the stress distribution, only predicting a constant offset.")
+                    
+                    # Check denormalized values
+                    pred_stress_denorm = pred_stress_norm_masked * dataset.stress_std + dataset.stress_mean
+                    target_stress_denorm = target_stress_norm_masked * dataset.stress_std + dataset.stress_mean
+                    print(f"  Denormalized (for reference):")
+                    print(f"    pred: mean={pred_stress_denorm.mean().item():.2f}, std={pred_stress_denorm.std().item():.2f}")
+                    print(f"    target: mean={target_stress_denorm.mean().item():.2f}, std={target_stress_denorm.std().item():.2f}")
+                    denorm_rmse = torch.sqrt((pred_stress_denorm - target_stress_denorm).pow(2).mean()).item()
+                    print(f"    Denormalized RMSE={denorm_rmse:.2f}")
+                    
+                    print(f"  ====================================\n")
             
             # Combined loss: velocity + stress
-            loss = velocity_loss_weight * loss_vel + loss_stress
+            # Don't divide by valid_timesteps here - we'll accumulate and divide at the end
+            # This allows proper gradient accumulation across all valid timesteps
+            if use_adaptive_scaling:
+                # Adaptive scaling: Update EMA of loss scales, then normalize both losses
+                # Update scales using exponential moving average (only on first valid timestep of each batch)
+                if valid_timesteps == 1:
+                    # Initialize or update scales with EMA
+                    current_vel_scale = max(loss_vel.item(), 0.1)  # Prevent division by zero
+                    current_stress_scale = max(loss_stress.item(), 1.0)
+                    
+                    # EMA update: new_scale = momentum * old_scale + (1 - momentum) * current_scale
+                    model.vel_loss_scale = ema_momentum * model.vel_loss_scale + (1 - ema_momentum) * current_vel_scale
+                    model.stress_loss_scale = ema_momentum * model.stress_loss_scale + (1 - ema_momentum) * current_stress_scale
+                
+                # Normalize both losses to ~1.0 magnitude (both terms are O(1) after normalization)
+                loss_vel_normalized = loss_vel / (model.vel_loss_scale + 1e-8)
+                loss_stress_normalized = loss_stress / (model.stress_loss_scale + 1e-8)
+                
+                # Combine with equal importance (both are now O(1))
+                loss = loss_vel_normalized + loss_stress_normalized
+                
+                # Track stress loss scale changes (minimal output)
+                if batch_idx == 0 and valid_timesteps == 1 and epoch > 0 and hasattr(model, '_prev_stress_scale'):
+                    scale_change = abs(model.stress_loss_scale - model._prev_stress_scale) / (model._prev_stress_scale + 1e-8)
+                    if scale_change < 0.01:
+                        print(f"  ⚠ Stress loss scale stuck (change: {scale_change*100:.2f}%) - stress loss not decreasing")
+                if batch_idx == 0 and valid_timesteps == 1:
+                    model._prev_stress_scale = model.stress_loss_scale
+            else:
+                # Fixed weight approach (original)
+                loss = velocity_loss_weight * loss_vel + loss_stress
             
-            # Backward pass
+            # Backward pass (accumulate gradients across timesteps)
             loss.backward()
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
+            # Accumulate losses (raw values, we'll average over valid_timesteps at the end)
             epoch_loss_batch += loss.item()
             epoch_loss_vel_batch += loss_vel.item()
             epoch_loss_stress_batch += loss_stress.item()
-            num_samples += 1
+            
+            # Track stress loss history to detect if it's stuck
+            if batch_idx == 0 and valid_timesteps == 1:
+                if not hasattr(model, '_stress_loss_history'):
+                    model._stress_loss_history = []
+                model._stress_loss_history.append(loss_stress.item())
+                
+                # Check if stress loss is decreasing (only warn if stuck)
+                if len(model._stress_loss_history) > 10:
+                    recent_losses = model._stress_loss_history[-10:]
+                    if max(recent_losses) - min(recent_losses) < 1.0:  # Less than 1.0 change in last 10 steps
+                        print(f"  ⚠ Stress loss STUCK at ~{loss_stress.item():.2f} (not learning)")
+            
+            # Check stress head gradients (essential for debugging stress learning)
+            if batch_idx == 0 and t == min(5, end_t-1) and valid_timesteps > 0 and (epoch == 0 or epoch % 50 == 0):
+                print("\n=== STRESS HEAD GRADIENT CHECK ===")
+                
+                # Stress head - check ALL layers
+                stress_head_grads = []
+                for i, layer in enumerate(model.stress_head):
+                    if isinstance(layer, nn.Linear) and layer.weight.grad is not None:
+                        stress_grad_norm = layer.weight.grad.norm().item()
+                        stress_grad_mean = layer.weight.grad.abs().mean().item()
+                        stress_head_grads.append((i, stress_grad_norm, stress_grad_mean))
+                        print(f"  Stress head layer {i}: norm={stress_grad_norm:.8f}, mean_abs={stress_grad_mean:.8f}")
+                        if stress_grad_norm < 1e-8:
+                            print(f"    ⚠ Gradient near zero! (vanishing gradient)")
+                
+                if len(stress_head_grads) == 0:
+                    print("  ⚠ CRITICAL: No gradients in stress head! Not learning!")
+                else:
+                    # Compare with velocity head for context
+                    if hasattr(model, 'phi_v'):
+                        phi_v_grads = []
+                        for i, layer in enumerate(model.phi_v):
+                            if isinstance(layer, nn.Linear) and layer.weight.grad is not None:
+                                phi_v_grad_norm = layer.weight.grad.norm().item()
+                                phi_v_grads.append((i, phi_v_grad_norm))
+                        if phi_v_grads:
+                            vel_max_grad = max([g[1] for g in phi_v_grads])
+                            stress_max_grad = max([g[1] for g in stress_head_grads])
+                            ratio = vel_max_grad / (stress_max_grad + 1e-10)
+                            if ratio > 100:
+                                print(f"  ⚠ Velocity gradients {ratio:.1f}x larger than stress - stress head may be under-learning")
+                
+                print("==================================\n")
         
-        total_loss += epoch_loss_batch
-        total_loss_vel += epoch_loss_vel_batch
-        total_loss_stress += epoch_loss_stress_batch
+        # Gradient clipping and optimizer step after all timesteps in sequence
+        if valid_timesteps > 0:  # Only step if we had valid timesteps
+            # Average losses over valid timesteps for reporting
+            avg_loss = epoch_loss_batch / valid_timesteps if valid_timesteps > 0 else 0.0
+            avg_loss_vel = epoch_loss_vel_batch / valid_timesteps if valid_timesteps > 0 else 0.0
+            avg_loss_stress = epoch_loss_stress_batch / valid_timesteps if valid_timesteps > 0 else 0.0
+            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            # Store averaged losses
+            total_loss += avg_loss
+            total_loss_vel += avg_loss_vel
+            total_loss_stress += avg_loss_stress
+            num_samples += 1
+            
+            # Debug: print accumulated losses
+        else:
+            # No valid timesteps - skip optimizer step
+            # Reset optimizer to avoid issues
+            optimizer.zero_grad()
         
         # Update progress bar
-        if batch_idx % 10 == 0:
-            avg_loss = epoch_loss_batch / (T - 1) if T > 1 else 0.0
-            avg_loss_vel = epoch_loss_vel_batch / (T - 1) if T > 1 else 0.0
-            avg_loss_stress = epoch_loss_stress_batch / (T - 1) if T > 1 else 0.0
+        if valid_timesteps > 0:
+            avg_loss = epoch_loss_batch / valid_timesteps
+            avg_loss_vel = epoch_loss_vel_batch / valid_timesteps
+            avg_loss_stress = epoch_loss_stress_batch / valid_timesteps
             pbar.set_postfix({
                 'loss': f'{avg_loss:.6f}',
                 'vel': f'{avg_loss_vel:.6f}',
-                'stress': f'{avg_loss_stress:.6f}'
+                'stress': f'{avg_loss_stress:.6f}',
+                'valid_t': f'{valid_timesteps}/{end_t-1}'
             })
     
     avg_loss = total_loss / num_samples if num_samples > 0 else 0.0
@@ -753,8 +1045,16 @@ def main():
                        help='Save predictions every N epochs (default: 1, every epoch)')
     parser.add_argument('--num_trajectories_for_predictions', type=int, default=None,
                        help='Number of trajectories to save predictions for (default: all)')
-    parser.add_argument('--velocity_loss_weight', type=float, default=1.0,
-                       help='Weight for velocity loss relative to stress loss (default: 1.0)')
+    parser.add_argument('--velocity_loss_weight', type=float, default=50000.0,
+                       help='Weight for velocity loss relative to stress loss (default: 50000.0 to balance with stress). Only used if --use_adaptive_scaling=False')
+    parser.add_argument('--use_adaptive_scaling', action='store_true',
+                       help='Use adaptive loss scaling with EMA instead of fixed velocity_loss_weight')
+    parser.add_argument('--max_timesteps', type=int, default=None,
+                       help='Maximum number of timesteps to use for training (default: None = use all 400 timesteps)')
+    parser.add_argument('--min_stress_threshold', type=float, default=5000.0,
+                       help='Minimum mean stress threshold for training on a timestep (default: 5000.0). Lower values allow training on early timesteps with low stress.')
+    parser.add_argument('--warmup_fraction', type=float, default=0.025,
+                       help='Fraction of timesteps to skip at the beginning (warmup period). Default: 0.025 (2.5%%). Set to 0.0 to train from t=1.')
     
     args = parser.parse_args()
     
@@ -785,35 +1085,64 @@ def main():
         num_workers=0  # Set to 0 to avoid issues with tfrecord loading
     )
     
+    # Save normalization statistics to JSON file for consistency
+    norm_stats_path = os.path.join(args.checkpoint_dir, 'norm_stats.json')
+    dataset.save_norm_stats(norm_stats_path)
+    
     # Create a separate dataloader for saving predictions (no shuffle)
     # Use same normalization stats as training dataset
-    eval_dataset = DeformingPlateDataset(
-        train_tfrecord, meta_path, 
-        num_trajectories=None, 
-        dataset_fraction=args.dataset_fraction,
-        stress_norm=dataset.stress_norm,
-        velocity_norm=dataset.velocity_norm,
-        compute_norm_stats=False  # Use stats from training dataset
-    ) if args.save_predictions else None
-    eval_dataloader = DataLoader(
-        eval_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0
-    ) if args.save_predictions else None
+    # CRITICAL FIX: Ensure eval_dataset has enough trajectories for predictions
+    # If num_trajectories_for_predictions is specified, use at least that many
+    # Otherwise, use the same number as training dataset
+    if args.save_predictions:
+        if args.num_trajectories_for_predictions is not None:
+            # Use at least num_trajectories_for_predictions trajectories
+            eval_num_trajectories = max(args.num_trajectories_for_predictions, len(dataset))
+        else:
+            # Use same as training dataset
+            eval_num_trajectories = len(dataset)
+        
+        eval_dataset = DeformingPlateDataset(
+            train_tfrecord, meta_path, 
+            num_trajectories=eval_num_trajectories,  # Explicitly set number of trajectories
+            dataset_fraction=None,  # Don't use fraction, use explicit num_trajectories
+            norm_stats_path=norm_stats_path,  # Load from saved file
+            compute_norm_stats=False  # Use saved stats
+        )
+        print(f"Eval dataset for predictions: {len(eval_dataset)} trajectories "
+              f"(will save {args.num_trajectories_for_predictions if args.num_trajectories_for_predictions else len(eval_dataset)} trajectories)")
+        eval_dataloader = DataLoader(
+            eval_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0
+        )
+    else:
+        eval_dataset = None
+        eval_dataloader = None
     
     # Determine feature dimensions from first sample
     sample = dataset[0]
     feat_dim = sample['feats'].shape[-1]  # Feature dimension
-    print(f"Feature dimension: {feat_dim}")
+    print(f"Feature dimension: {feat_dim} (expected: 8 = [position(3), actuation(3), node_type_one_hot(2)])")
+    assert feat_dim == 8, f"Expected 8D input features, got {feat_dim}D"
     
-    # Create model
-    # Output: velocity (3D) + stress (1D) = 4D
+    # Verify target shapes
+    print(f"Target velocity shape: {sample['target_vel'].shape} (expected: (T, N, 3))")
+    print(f"Target stress shape: {sample['target_stress'].shape} (expected: (T, N, 1))")
+    print(f"Coordinates shape: {sample['coors'].shape} (expected: (T, N, 3))")
+    print(f"Cells shape: {sample.get('cells', 'N/A')} (for connectivity only)")
+    
+    # Create model following paper architecture
+    # Get average number of nodes for C initialization (C = 1/(N-1))
+    sample_coors = sample['coors']
+    num_nodes_avg = int(sample_coors.shape[1])  # Use actual number of nodes from first sample
+    
     model = MeshEGNN(
         in_dim=feat_dim,
         hidden_dim=args.hidden_dim,
-        edge_dim=0,
-        depth=args.depth
+        depth=args.depth,
+        num_nodes_avg=num_nodes_avg
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -831,12 +1160,24 @@ def main():
     print(f"Dataset fraction: {args.dataset_fraction*100:.1f}% ({len(dataset)} trajectories)")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.learning_rate}")
-    print(f"Velocity loss weight: {args.velocity_loss_weight}")
+    if args.max_timesteps is not None:
+        print(f"Max timesteps per trajectory: {args.max_timesteps} (out of 400 total)")
+    else:
+        print(f"Max timesteps per trajectory: All 400 timesteps")
+    print(f"Warmup fraction: {args.warmup_fraction*100:.1f}% (skipping first {int(400 * args.warmup_fraction)} timesteps)")
+    print(f"Min stress threshold: {args.min_stress_threshold:.1f}")
+    if args.use_adaptive_scaling:
+        print(f"Loss scaling: ADAPTIVE (EMA-based)")
+    else:
+        print(f"Velocity loss weight: {args.velocity_loss_weight}")
     print("-" * 70)
     
     for epoch in range(args.num_epochs):
         avg_loss, avg_loss_vel, avg_loss_stress = train_epoch(
-            model, dataloader, optimizer, device, epoch, args.velocity_loss_weight
+            model, dataloader, optimizer, device, epoch, args.velocity_loss_weight, 
+            dataset=dataset, use_adaptive_scaling=args.use_adaptive_scaling,
+            max_timesteps=args.max_timesteps, min_stress_threshold=args.min_stress_threshold,
+            warmup_fraction=args.warmup_fraction
         )
         train_losses.append(avg_loss)
         train_losses_vel.append(avg_loss_vel)
@@ -851,9 +1192,10 @@ def main():
             try:
                 save_predictions(
                     model, eval_dataloader, device, predictions_dir, epoch,
+                    dataset=eval_dataset,  # Pass dataset for denormalization
                     num_trajectories=args.num_trajectories_for_predictions,
-                    stress_norm=dataset.stress_norm,
-                    velocity_norm=dataset.velocity_norm
+                    max_timesteps=args.max_timesteps,  # Use same max_timesteps as training
+                    use_autoregressive=True  # Use autoregressive prediction (no teacher forcing) for evaluation
                 )
             except Exception as e:
                 print(f"  ⚠ Warning: Failed to save predictions for epoch {epoch+1}: {e}")
