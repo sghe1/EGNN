@@ -48,6 +48,8 @@ class MeshEGNN(nn.Module):
         self.input_mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
         
@@ -74,6 +76,8 @@ class MeshEGNN(nn.Module):
         self.phi_v = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            SiLU(),
             nn.Linear(hidden_dim, 3)  # Output 3D velocity directly, not scalar!
         )
         
@@ -84,14 +88,18 @@ class MeshEGNN(nn.Module):
         self.phi_e = nn.Sequential(
             nn.Linear(edge_input_dim, edge_input_dim * 2),
             SiLU(),
+            nn.Linear(edge_input_dim * 2, edge_input_dim * 2),
+            SiLU(),
             nn.Linear(edge_input_dim * 2, hidden_dim),
             SiLU()
         )
 
         # φ_x: MLP that outputs scalar weight per edge for coordinate updates (Equation 7)
-        # 2-layer MLP with SiLU as per paper
+        # 2 hidden layer MLP with SiLU as per paper
         # Normalization in the dataset will handle scaling appropriately
         self.phi_x = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             SiLU(),
             nn.Linear(hidden_dim, 1)
@@ -104,10 +112,10 @@ class MeshEGNN(nn.Module):
         # Stress prediction head: outputs normalized stress from final embeddings
         # NOTE: Model outputs normalized stress (can be negative after normalization)
         # ReLU will be applied during denormalization to ensure physical constraint (stress >= 0)
-        # CRITICAL FIX: Simplified from 5 layers to 2 layers to maximize gradient flow
-        # Very deep networks can struggle to learn when gradients vanish through many layers
-        # Using only 2 layers (1 hidden) to ensure gradients flow properly
+        # Using 2 hidden layers for consistency with other MLPs
         self.stress_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),  # 128 → 128
+            SiLU(),
             nn.Linear(hidden_dim, hidden_dim),  # 128 → 128
             SiLU(),
             nn.Linear(hidden_dim, 1)  # 128 → 1

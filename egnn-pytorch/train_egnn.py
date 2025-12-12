@@ -411,6 +411,138 @@ def compute_target_stress(stress_array):
     return torch.tensor(stress_array, dtype=torch.float32)
 
 
+def custom_collate_fn(batch):
+    """
+    Custom collate function for variable-sized graphs.
+    
+    Implements graph batching by concatenating all graphs into one large graph
+    with a block-diagonal adjacency matrix. This allows batching graphs with
+    different numbers of nodes.
+    
+    Strategy:
+    - If batch_size=1, return the single item directly
+    - If batch_size > 1, always use graph batching (works for both same-size and different-size graphs):
+      * Concatenate all node features, coordinates, targets along the node dimension
+      * Create block-diagonal adjacency matrix (ensures nodes from different graphs don't interact)
+      * Create batch_index to track which nodes belong to which graph
+      * Process as single batch item (B=1) with total_N nodes
+    """
+    # CRITICAL: This function MUST be called by DataLoader
+    # If you see errors about tensor size mismatches, it means default_collate was called instead
+    # Validate batch format - ensure all items are dictionaries
+    if not isinstance(batch, list):
+        raise TypeError(f"Expected batch to be a list, got {type(batch)}")
+    
+    if len(batch) == 0:
+        raise ValueError("Batch is empty")
+    
+    # Check that all items are dictionaries
+    # If any item is not a dict, it means default_collate was called first (shouldn't happen)
+    for i, item in enumerate(batch):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"Batch item {i} is not a dictionary, got {type(item)}. "
+                f"This suggests default_collate was called before custom_collate_fn. "
+                f"Item: {item if not isinstance(item, torch.Tensor) else f'Tensor of shape {item.shape}'}"
+            )
+    
+    # If batch_size=1, just return the single item
+    if len(batch) == 1:
+        return batch[0]
+    
+    # For batch_size > 1, always use graph batching
+    # This is more robust and handles both same-size and different-size graphs
+    # Graph batching concatenates all graphs into one large graph with block-diagonal adjacency
+    # Standard approach: concatenate all graphs and process as single batch item (B=1)
+    # Get dimensions
+    num_graphs = len(batch)
+    
+    # Validate that all items have required keys
+    required_keys = ['coors', 'feats', 'target_vel', 'target_stress', 'world_pos', 'adj_mat']
+    for i, item in enumerate(batch):
+        for key in required_keys:
+            if key not in item:
+                raise KeyError(f"Batch item {i} missing required key '{key}'. Available keys: {list(item.keys())}")
+    
+    T = batch[0]['coors'].shape[0]  # All should have same T
+    node_counts = [item['coors'].shape[1] for item in batch]  # Different N per graph
+    total_nodes = sum(node_counts)
+    
+    # Verify all have same T
+    assert all(item['coors'].shape[0] == T for item in batch), \
+        f"All trajectories must have same number of timesteps T, got {[item['coors'].shape[0] for item in batch]}"
+    
+    # Initialize concatenated tensors (B=1 for concatenated graph)
+    device = batch[0]['coors'].device
+    dtype = batch[0]['coors'].dtype
+    
+    coors_batched = torch.zeros(1, T, total_nodes, 3, dtype=dtype, device=device)
+    feats_batched = torch.zeros(1, T, total_nodes, batch[0]['feats'].shape[2], dtype=dtype, device=device)
+    target_vel_batched = torch.zeros(1, T, total_nodes, 3, dtype=dtype, device=device)
+    target_stress_batched = torch.zeros(1, T, total_nodes, 1, dtype=dtype, device=device)
+    world_pos_batched = torch.zeros(1, T, total_nodes, 3, dtype=dtype, device=device)
+    
+    # Create block-diagonal adjacency matrix (single batch item)
+    adj_mat_batched = torch.zeros(1, total_nodes, total_nodes, dtype=torch.bool, device=device)
+    
+    # Create batch index: which graph does each node belong to?
+    batch_index = torch.zeros(total_nodes, dtype=torch.long, device=device)
+    
+    # Concatenate each graph along the node dimension
+    node_offset = 0
+    for graph_idx, item in enumerate(batch):
+        n_nodes = node_counts[graph_idx]
+        
+        # Handle input format: item might be (T, N, ...) or already have batch dimension
+        coors_item = item['coors']
+        feats_item = item['feats']
+        target_vel_item = item['target_vel']
+        target_stress_item = item['target_stress']
+        world_pos_item = item['world_pos']
+        adj_mat_item = item['adj_mat']
+        
+        # Remove batch dimension if present (should be single trajectory)
+        if len(coors_item.shape) == 4:  # (1, T, N, 3)
+            coors_item = coors_item[0]  # (T, N, 3)
+            feats_item = feats_item[0]
+            target_vel_item = target_vel_item[0]
+            target_stress_item = target_stress_item[0]
+            world_pos_item = world_pos_item[0]
+        
+        # Copy data into concatenated tensor (all graphs in single batch item)
+        coors_batched[0, :, node_offset:node_offset+n_nodes, :] = coors_item
+        feats_batched[0, :, node_offset:node_offset+n_nodes, :] = feats_item
+        target_vel_batched[0, :, node_offset:node_offset+n_nodes, :] = target_vel_item
+        target_stress_batched[0, :, node_offset:node_offset+n_nodes, :] = target_stress_item
+        world_pos_batched[0, :, node_offset:node_offset+n_nodes, :] = world_pos_item
+        
+        # Add adjacency matrix as block (handle both 2D and 3D adj_mat)
+        if len(adj_mat_item.shape) == 2:
+            # (N, N) - direct assignment
+            adj_mat_batched[0, node_offset:node_offset+n_nodes, node_offset:node_offset+n_nodes] = adj_mat_item
+        elif len(adj_mat_item.shape) == 3:
+            # (1, N, N) or (B_item, N, N) - take first
+            adj_mat_batched[0, node_offset:node_offset+n_nodes, node_offset:node_offset+n_nodes] = adj_mat_item[0]
+        else:
+            raise ValueError(f"Unexpected adj_mat shape: {adj_mat_item.shape}")
+        
+        # Set batch index
+        batch_index[node_offset:node_offset+n_nodes] = graph_idx
+        
+        node_offset += n_nodes
+    
+    return {
+        'coors': coors_batched,  # (1, T, total_N, 3)
+        'feats': feats_batched,  # (1, T, total_N, feat_dim)
+        'adj_mat': adj_mat_batched,  # (1, total_N, total_N) - block diagonal
+        'target_vel': target_vel_batched,  # (1, T, total_N, 3)
+        'target_stress': target_stress_batched,  # (1, T, total_N, 1)
+        'world_pos': world_pos_batched,  # (1, T, total_N, 3)
+        'batch_index': batch_index,  # (total_N,) - which graph each node belongs to
+        'node_counts': node_counts,  # List of node counts per graph (for loss computation)
+    }
+
+
 def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, num_trajectories=None, max_timesteps=None, use_autoregressive=True):
     """
     Save predictions and ground truth values for a subset of trajectories.
@@ -523,45 +655,63 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
                 # Forward pass: model outputs NORMALIZED predictions (should be masked for non-NORMAL nodes)
                 pred_vel_norm, pred_stress_norm = model(feats_prev_norm, coors_prev_norm, adj_mat_t, v_init=None)
                 
-                # Verify masking is working - check non-NORMAL nodes have zero predictions
+                # Verify masking is working
+                # Velocity: only NORMAL nodes (node_type == 0) should have non-zero velocity
+                # Stress: NORMAL (node_type == 0) or HANDLE (node_type == 3) nodes can have non-zero stress
+                # OBSTACLE nodes (node_type == 1) should have zero for both
                 node_type_one_hot_check = feats_prev_norm[:, :, 6:8]  # (B, N, 2)
                 tolerance = 1e-6
                 normal_mask_check = ((node_type_one_hot_check[:, :, 0].abs() < tolerance) & 
-                                    (node_type_one_hot_check[:, :, 1].abs() < tolerance)).float()  # (B, N)
-                non_normal_mask_check = 1.0 - normal_mask_check  # (B, N)
+                                    (node_type_one_hot_check[:, :, 1].abs() < tolerance)).float()  # (B, N) - node_type == 0
+                obstacle_mask_check = (node_type_one_hot_check[:, :, 0].abs() > 0.5).float()  # (B, N) - node_type == 1 (OBSTACLE)
+                non_normal_vel_mask = 1.0 - normal_mask_check  # (B, N) - non-NORMAL nodes for velocity
                 
-                if non_normal_mask_check.sum().item() > 0:  # If there are non-NORMAL nodes
-                    pred_stress_non_normal = pred_stress_norm.squeeze(-1)[non_normal_mask_check > 0.5]  # (num_non_normal,)
-                    if pred_stress_non_normal.numel() > 0:
-                        max_non_normal = pred_stress_non_normal.abs().max().item()
-                        if max_non_normal > 1e-5:  # Should be essentially zero
+                # Check velocity: non-NORMAL nodes should have zero velocity
+                if non_normal_vel_mask.sum().item() > 0:
+                    pred_vel_non_normal = pred_vel_norm[non_normal_vel_mask > 0.5]  # (num_non_normal, 3)
+                    if pred_vel_non_normal.numel() > 0:
+                        max_non_normal_vel = pred_vel_non_normal.abs().max().item()
+                        if max_non_normal_vel > 1e-5:  # Should be essentially zero
                             # Force to zero as a safeguard
-                            pred_stress_norm = pred_stress_norm * normal_mask_check.unsqueeze(-1)
                             pred_vel_norm = pred_vel_norm * normal_mask_check.unsqueeze(-1).unsqueeze(-1)
+                
+                # Check stress: OBSTACLE nodes (node_type == 1) should have zero stress
+                # HANDLE nodes (node_type == 3) can have non-zero stress, so we only check OBSTACLE
+                if obstacle_mask_check.sum().item() > 0:
+                    pred_stress_obstacle = pred_stress_norm.squeeze(-1)[obstacle_mask_check > 0.5]  # (num_obstacle,)
+                    if pred_stress_obstacle.numel() > 0:
+                        max_obstacle_stress = pred_stress_obstacle.abs().max().item()
+                        if max_obstacle_stress > 1e-5:  # Should be essentially zero
+                            # Force OBSTACLE nodes to zero as a safeguard
+                            stress_mask_for_obstacle = 1.0 - obstacle_mask_check  # (B, N) - non-OBSTACLE nodes
+                            pred_stress_norm = pred_stress_norm * stress_mask_for_obstacle.unsqueeze(-1)
                 
                 
                 # DENORMALIZE predictions for saving
-                # CRITICAL: Extract node_type to mask non-NORMAL nodes after denormalization
+                # CRITICAL: Extract node_type to mask nodes after denormalization
                 # The model should already mask predictions, but we double-check here for safety
                 node_type_one_hot = feats_prev_norm[:, :, 6:8]  # (B, N, 2)
                 tolerance = 1e-6
-                normal_node_mask = ((node_type_one_hot[:, :, 0].abs() < tolerance) & 
-                                   (node_type_one_hot[:, :, 1].abs() < tolerance)).float()  # (B, N)
-                normal_node_mask = normal_node_mask.unsqueeze(-1)  # (B, N, 1) for broadcasting
+                # Velocity mask: only node_type == 0 (NORMAL nodes)
+                velocity_node_mask = ((node_type_one_hot[:, :, 0].abs() < tolerance) & 
+                                     (node_type_one_hot[:, :, 1].abs() < tolerance)).float()  # (B, N)
+                velocity_node_mask = velocity_node_mask.unsqueeze(-1)  # (B, N, 1) for broadcasting
+                
+                # Stress mask: node_type == 0 (NORMAL) OR node_type == 3 (HANDLE)
+                stress_node_mask = (node_type_one_hot[:, :, 0].abs() < tolerance).float()  # (B, N)
+                stress_node_mask = stress_node_mask.unsqueeze(-1)  # (B, N, 1) for broadcasting
                 
                 # Velocity: v = v_norm * vel_std
                 pred_vel_denorm = pred_vel_norm * vel_std  # (B, N, 3)
                 # Ensure non-NORMAL nodes have zero velocity
-                pred_vel_denorm = pred_vel_denorm * normal_node_mask  # (B, N, 3)
+                pred_vel_denorm = pred_vel_denorm * velocity_node_mask  # (B, N, 3)
                 
                 # Stress: s = s_norm * stress_std + stress_mean
-                # CRITICAL FIX: For non-NORMAL nodes, pred_stress_norm should be 0, but if it's not,
-                # we need to mask after denormalization to prevent stress_mean from being added
-                # Only denormalize for NORMAL nodes, set to 0 for others
+                # Denormalize for NORMAL or HANDLE nodes (node_type == 0 or 3), set to 0 for others
                 pred_stress_denorm = torch.where(
-                    normal_node_mask > 0.5,  # If NORMAL node
+                    stress_node_mask > 0.5,  # If NORMAL or HANDLE node
                     pred_stress_norm * stress_std + stress_mean,  # Denormalize
-                    torch.zeros_like(pred_stress_norm)  # Set to 0 for non-NORMAL nodes
+                    torch.zeros_like(pred_stress_norm)  # Set to 0 for other nodes (OBSTACLE)
                 )  # (B, N, 1)
                 pred_stress_denorm = torch.clamp(pred_stress_denorm, min=0.0)  # Ensure stress >= 0 (von Mises stress)
                 pred_stress_denorm = pred_stress_denorm.unsqueeze(-1)  # (B, N, 1)
@@ -671,12 +821,19 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
     for batch_idx, batch in enumerate(pbar):
-        coors_seq = batch['coors'].to(device)  # (B, T, N, 3) or (T, N, 3)
-        feats_seq = batch['feats'].to(device)  # (B, T, N, feat_dim) or (T, N, feat_dim)
-        adj_mat = batch['adj_mat'].to(device)   # (B, N, N) or (N, N)
-        target_vel = batch['target_vel'].to(device)  # (B, T, N, 3) or (T, N, 3)
-        target_stress = batch['target_stress'].to(device)  # (B, T, N, 1) or (T, N, 1)
-        world_pos = batch['world_pos'].to(device)  # (B, T, N, 3) or (T, N, 3)
+        # Custom collate function always returns a dict (single item or batched)
+        coors_seq = batch['coors'].to(device)  # (B, T, N, 3) or (T, N, 3) or (B, T, total_N, 3) for graph batching
+        feats_seq = batch['feats'].to(device)  # (B, T, N, feat_dim) or (T, N, feat_dim) or (B, T, total_N, feat_dim)
+        adj_mat = batch['adj_mat'].to(device)   # (B, N, N) or (N, N) or (B, total_N, total_N) for graph batching
+        target_vel = batch['target_vel'].to(device)  # (B, T, N, 3) or (T, N, 3) or (B, T, total_N, 3)
+        target_stress = batch['target_stress'].to(device)  # (B, T, N, 1) or (T, N, 1) or (B, T, total_N, 1)
+        world_pos = batch['world_pos'].to(device)  # (B, T, N, 3) or (T, N, 3) or (B, T, total_N, 3)
+        
+        # Get batch_index and node_counts if available (from graph batching)
+        batch_index = batch.get('batch_index')  # (total_N,) - which graph each node belongs to
+        node_counts = batch.get('node_counts')  # List of node counts per graph
+        if batch_index is not None:
+            batch_index = batch_index.to(device)
         
         # Handle batch dimension
         if len(coors_seq.shape) == 3:  # (T, N, 3) - single trajectory
@@ -693,6 +850,15 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
         epoch_loss_vel_batch = 0.0
         epoch_loss_stress_batch = 0.0
         
+        # Storage for rollout error computation (denormalized values)
+        # Store predictions and targets for each valid timestep
+        rollout_pred_vel = []  # List of (B, N, 3) tensors in denormalized space
+        rollout_pred_stress = []  # List of (B, N, 1) tensors in denormalized space
+        rollout_target_vel = []  # List of (B, N, 3) tensors in denormalized space
+        rollout_target_stress = []  # List of (B, N, 1) tensors in denormalized space
+        rollout_valid_timestep_indices = []  # Track which timesteps were valid (for indexing)
+        rollout_velocity_mask_list = []  # Store velocity masks for each timestep
+        rollout_stress_mask_list = []  # Store stress masks for each timestep
         
         # Process each timestep (starting from t=1)
         # TEACHER FORCING: Use ground truth positions at each timestep (not autoregressive)
@@ -737,8 +903,14 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
             # Set end_t to start_t + 1 as a fallback, but this will likely skip all timesteps due to stress threshold
             end_t = start_t + 1
         
+        # Detect graph batching mode (when batch_index is available)
+        is_graph_batching = (batch_index is not None and node_counts is not None)
+        num_graphs_in_batch = len(node_counts) if is_graph_batching else B
+        
         if batch_idx == 0 and epoch == 0:  # Only print once at start
             print(f"Training on timesteps: {start_t} to {end_t-1} (min stress threshold: {MIN_STRESS_THRESHOLD:.1f})")
+            if is_graph_batching:
+                print(f"  Graph batching mode: {num_graphs_in_batch} graphs in batch (total {N} nodes)")
         
         for t in range(start_t, end_t):
             # TEACHER FORCING: Use ground truth positions and features at time t-1
@@ -756,25 +928,81 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
             target_vel_t = target_vel[:, t]      # Velocity at time t
             target_stress_t = target_stress[:, t]  # Stress at time t
             
-            # Check if this timestep has significant stress
-            # Skip timesteps with low stress - nothing interesting happening yet
-            # CRITICAL: Only check stress on NORMAL nodes (node_type == 0)
-            # Non-NORMAL nodes should have zero stress, so including them would skew the mean
-            stress_mask = ((node_type_one_hot[:, :, 0].abs() < 1e-6) & (node_type_one_hot[:, :, 1].abs() < 1e-6)).float()  # (B, N)
-            if stress_mask.sum() > 0:
-                mean_stress = (target_stress_t.squeeze(-1).abs() * stress_mask).sum().item() / (stress_mask.sum().item() + 1e-8)
+            # Create masks for velocity and stress losses
+            # Velocity mask: only node_type == 0 (NORMAL nodes)
+            # Encoding: 0 (NORMAL) -> [0, 0], 1 (OBSTACLE) -> [1, 0], 3 (HANDLE) -> [0, 1]
+            velocity_mask = ((node_type_one_hot[:, :, 0].abs() < 1e-6) & (node_type_one_hot[:, :, 1].abs() < 1e-6)).float()  # (B, N) - node_type == 0 only
+            
+            # Stress mask: node_type == 0 (NORMAL) OR node_type == 3 (HANDLE)
+            # node_type == 0: [0, 0], node_type == 3: [0, 1] -> both have one_hot[0] ≈ 0
+            stress_mask = (node_type_one_hot[:, :, 0].abs() < 1e-6).float()  # (B, N) - node_type == 0 OR 3
+            
+            # PER-TRAJECTORY STRESS THRESHOLDING
+            if is_graph_batching:
+                # Graph batching mode: compute mean_stress per graph and filter
+                # batch_index: (total_N,) maps each node to graph id [0..num_graphs-1]
+                # For batch item 0 (since graph batching creates B=1), extract node-level data
+                target_stress_t_flat = target_stress_t[0].squeeze(-1)  # (total_N,) - remove batch and feature dims
+                stress_mask_flat = stress_mask[0]  # (total_N,)
+                
+                # Compute mean_stress per graph using vectorized operations
+                # Group nodes by graph_id using batch_index
+                mean_stress_per_graph = []
+                node_offset = 0
+                for g in range(num_graphs_in_batch):
+                    n_nodes_g = node_counts[g]
+                    # Get nodes belonging to graph g
+                    node_indices_g = torch.arange(node_offset, node_offset + n_nodes_g, device=device)
+                    # Extract stress and mask for this graph
+                    stress_g = target_stress_t_flat[node_indices_g]  # (n_nodes_g,)
+                    mask_g = stress_mask_flat[node_indices_g]  # (n_nodes_g,)
+                    # Compute mean stress for this graph (only over masked nodes)
+                    if mask_g.sum() > 0:
+                        mean_stress_g = (stress_g.abs() * mask_g).sum().item() / (mask_g.sum().item() + 1e-8)
+                    else:
+                        mean_stress_g = 0.0
+                    mean_stress_per_graph.append(mean_stress_g)
+                    node_offset += n_nodes_g
+                
+                # Filter graphs that pass threshold
+                valid_graphs = [g for g in range(num_graphs_in_batch) if mean_stress_per_graph[g] >= MIN_STRESS_THRESHOLD]
+                
+                # Skip timestep if no graphs are valid
+                if len(valid_graphs) == 0:
+                    skipped_low_stress += 1
+                    if batch_idx == 0 and valid_timesteps == 0 and t == end_t - 1:
+                        print(f"  ⚠ All timesteps have no graphs with stress >= {MIN_STRESS_THRESHOLD} - no training data")
+                    continue
+                
+                valid_timesteps += 1
+                
+                # Debug print for first valid timestep
+                if batch_idx == 0 and epoch == 0 and valid_timesteps == 1:
+                    mean_stress_array = np.array(mean_stress_per_graph)
+                    print(f"  Per-trajectory stress thresholding (t={t}):")
+                    print(f"    Graphs in batch: {num_graphs_in_batch}")
+                    print(f"    Graphs passing threshold: {len(valid_graphs)}/{num_graphs_in_batch}")
+                    if len(mean_stress_per_graph) > 0:
+                        print(f"    Mean stress per graph: min={mean_stress_array.min():.1f}, "
+                              f"median={np.median(mean_stress_array):.1f}, max={mean_stress_array.max():.1f}")
             else:
-                mean_stress = 0.0
-            
-            if mean_stress < MIN_STRESS_THRESHOLD:
-                # Skip timesteps with low stress - avoid learning to predict zeros
-                skipped_low_stress += 1
-                # Warn if we're skipping all timesteps due to stress threshold
-                if batch_idx == 0 and valid_timesteps == 0 and t == end_t - 1:
-                    print(f"  ⚠ All timesteps have stress < {MIN_STRESS_THRESHOLD} - no training data")
-                continue
-            
-            valid_timesteps += 1
+                # Standard batching mode (batch_size=1 or same-size graphs): use existing logic
+                # Check if this timestep has significant stress
+                if stress_mask.sum() > 0:
+                    mean_stress = (target_stress_t.squeeze(-1).abs() * stress_mask).sum().item() / (stress_mask.sum().item() + 1e-8)
+                else:
+                    mean_stress = 0.0
+                
+                if mean_stress < MIN_STRESS_THRESHOLD:
+                    # Skip timesteps with low stress - avoid learning to predict zeros
+                    skipped_low_stress += 1
+                    # Warn if we're skipping all timesteps due to stress threshold
+                    if batch_idx == 0 and valid_timesteps == 0 and t == end_t - 1:
+                        print(f"  ⚠ All timesteps have stress < {MIN_STRESS_THRESHOLD} - no training data")
+                    continue
+                
+                valid_timesteps += 1
+                valid_graphs = list(range(B))  # All batch items are valid in standard mode
             
             # Forward pass: predict velocity and stress at time t given state at t-1
             # CRITICAL: Model receives NORMALIZED inputs (feats, coors) and outputs NORMALIZED predictions
@@ -786,16 +1014,19 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
             if torch.isnan(pred_vel_norm).any() or torch.isnan(pred_stress_norm).any():
                 continue
             
-            # stress_mask already created above for threshold check
-            # Use the same mask for both velocity and stress loss (node_type == 0 only)
-            node_mask = stress_mask  # Same mask for both losses
-            mask_sum = node_mask.sum().item()
-            if mask_sum < 1.0:
-                # Mask is invalid (0 nodes), this indicates node_type encoding issue
-                print(f"  ⚠ WARNING: Invalid node mask (sum={mask_sum:.6f}), expected node_type==0 for loss computation")
+            # Validate masks
+            velocity_mask_sum = velocity_mask.sum().item()
+            stress_mask_sum = stress_mask.sum().item()
+            if velocity_mask_sum < 1.0:
+                # Velocity mask is invalid (0 nodes), this indicates node_type encoding issue
+                print(f"  ⚠ WARNING: Invalid velocity mask (sum={velocity_mask_sum:.6f}), expected node_type==0 for velocity loss")
                 # Fallback: use all nodes if mask is completely wrong
-                stress_mask = torch.ones_like(node_mask)
-                node_mask = stress_mask
+                velocity_mask = torch.ones_like(velocity_mask)
+            if stress_mask_sum < 1.0:
+                # Stress mask is invalid (0 nodes), this indicates node_type encoding issue
+                print(f"  ⚠ WARNING: Invalid stress mask (sum={stress_mask_sum:.6f}), expected node_type==0 or 3 for stress loss")
+                # Fallback: use all nodes if mask is completely wrong
+                stress_mask = torch.ones_like(stress_mask)
             
             # NORMALIZE TARGETS: Targets come in original scale, normalize them for loss computation
             # This ensures loss is computed in normalized space (O(1) magnitudes)
@@ -808,26 +1039,145 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
                 # Normalize targets: v_norm = v / vel_std, s_norm = (s - stress_mean) / stress_std
                 target_vel_t_norm = target_vel_t / vel_std  # (B, N, 3)
                 target_stress_t_norm = (target_stress_t.squeeze(-1) - stress_mean) / stress_std  # (B, N)
+                
+                # Denormalize predictions for rollout error computation
+                # pred_vel_norm: (B, N, 3) in normalized space
+                # pred_stress_norm: (B, N, 1) in normalized space
+                pred_vel_denorm = pred_vel_norm * vel_std  # (B, N, 3) - denormalized
+                pred_stress_denorm = pred_stress_norm * stress_std + stress_mean  # (B, N, 1) - denormalized
             else:
                 # Fallback: no normalization (shouldn't happen)
                 target_vel_t_norm = target_vel_t
                 target_stress_t_norm = target_stress_t.squeeze(-1)
+                pred_vel_denorm = pred_vel_norm
+                pred_stress_denorm = pred_stress_norm
             
+            # Store denormalized predictions and targets for rollout error computation
+            # Store as detached tensors to avoid memory issues
+            rollout_pred_vel.append(pred_vel_denorm.detach().cpu())
+            rollout_pred_stress.append(pred_stress_denorm.detach().cpu())
+            rollout_target_vel.append(target_vel_t.detach().cpu())  # Already in original scale
+            rollout_target_stress.append(target_stress_t.detach().cpu())  # Already in original scale
+            rollout_valid_timestep_indices.append(t)
+            rollout_velocity_mask_list.append(velocity_mask.detach().cpu())
+            rollout_stress_mask_list.append(stress_mask.detach().cpu())
             
-            # Velocity loss: compute per-node, then mask and average (on NORMALIZED values)
-            # Both predictions and targets are in normalized space (O(1) magnitudes)
-            vel_error = (pred_vel_norm - target_vel_t_norm) ** 2  # (B, N, 3)
-            vel_error_per_node = torch.sum(vel_error, dim=-1)  # (B, N)
-            vel_error_masked = vel_error_per_node * node_mask  # (B, N)
-            loss_vel = vel_error_masked.sum() / (node_mask.sum() + 1e-8)  # Average over masked nodes
-            
-            # Stress loss: compute per-node, then mask and average (on NORMALIZED values)
-            # CRITICAL FIX: Use stress_mask (node_type == 0) for loss computation
-            # Both velocity and stress loss are computed on node_type == 0 only
-            # Boundary/actuator nodes (node_type == 1 or 3) are fixed and should not contribute to loss
-            stress_error = (pred_stress_norm.squeeze(-1) - target_stress_t_norm) ** 2  # (B, N) - ensure shapes match
-            stress_error_masked = stress_error * stress_mask  # (B, N) - use NORMAL nodes (node_type == 0)
-            loss_stress = stress_error_masked.sum() / (stress_mask.sum() + 1e-8)  # Average over plate nodes
+            # PER-TRAJECTORY LOSS COMPUTATION
+            if is_graph_batching:
+                # Graph batching mode: compute loss per graph, then average across valid graphs
+                # Extract node-level data (batch item 0 since graph batching creates B=1)
+                pred_vel_norm_flat = pred_vel_norm[0]  # (total_N, 3)
+                pred_stress_norm_flat = pred_stress_norm[0].squeeze(-1)  # (total_N,)
+                target_vel_t_norm_flat = target_vel_t_norm[0]  # (total_N, 3)
+                target_stress_t_norm_flat = target_stress_t_norm[0]  # (total_N,)
+                velocity_mask_flat = velocity_mask[0]  # (total_N,)
+                stress_mask_flat = stress_mask[0]  # (total_N,)
+                
+                # Compute losses per graph
+                loss_vel_per_graph = []
+                loss_stress_per_graph = []
+                
+                node_offset = 0
+                for g in range(num_graphs_in_batch):
+                    n_nodes_g = node_counts[g]
+                    node_indices_g = torch.arange(node_offset, node_offset + n_nodes_g, device=device)
+                    
+                    # Extract data for this graph
+                    pred_vel_g = pred_vel_norm_flat[node_indices_g]  # (n_nodes_g, 3)
+                    pred_stress_g = pred_stress_norm_flat[node_indices_g]  # (n_nodes_g,)
+                    target_vel_g = target_vel_t_norm_flat[node_indices_g]  # (n_nodes_g, 3)
+                    target_stress_g = target_stress_t_norm_flat[node_indices_g]  # (n_nodes_g,)
+                    velocity_mask_g = velocity_mask_flat[node_indices_g]  # (n_nodes_g,)
+                    stress_mask_g = stress_mask_flat[node_indices_g]  # (n_nodes_g,)
+                    
+                    # Velocity loss for this graph
+                    vel_error_g = (pred_vel_g - target_vel_g) ** 2  # (n_nodes_g, 3)
+                    vel_error_per_node_g = torch.sum(vel_error_g, dim=-1)  # (n_nodes_g,)
+                    vel_error_masked_g = vel_error_per_node_g * velocity_mask_g  # (n_nodes_g,)
+                    loss_vel_g = vel_error_masked_g.sum() / (velocity_mask_g.sum() + 1e-8)  # Scalar
+                    
+                    # Stress loss for this graph
+                    stress_error_g = (pred_stress_g - target_stress_g) ** 2  # (n_nodes_g,)
+                    stress_error_masked_g = stress_error_g * stress_mask_g  # (n_nodes_g,)
+                    
+                    # Penalties for this graph
+                    target_stress_nonzero_g = (target_stress_g.abs() > 1e-6).float()  # (n_nodes_g,)
+                    pred_stress_abs_g = pred_stress_g.abs()  # (n_nodes_g,)
+                    pred_stress_near_zero_g = (pred_stress_abs_g < 0.01).float()  # (n_nodes_g,)
+                    zero_prediction_penalty_g = (target_stress_nonzero_g * pred_stress_near_zero_g * stress_mask_g).sum() / (stress_mask_g.sum() + 1e-8)
+                    
+                    target_stress_abs_g = target_stress_g.abs()  # (n_nodes_g,)
+                    severe_underestimate_g = (pred_stress_abs_g < 0.1 * target_stress_abs_g) & (target_stress_abs_g > 0.1)  # (n_nodes_g,)
+                    underestimate_penalty_g = (severe_underestimate_g.float() * stress_mask_g).sum() / (stress_mask_g.sum() + 1e-8)
+                    
+                    penalty_weight_zero = 1.0
+                    penalty_weight_under = 0.5
+                    mean_target_sq_g = (target_stress_g ** 2 * stress_mask_g).sum() / (stress_mask_g.sum() + 1e-8)
+                    zero_penalty_g = penalty_weight_zero * mean_target_sq_g * zero_prediction_penalty_g
+                    under_penalty_g = penalty_weight_under * mean_target_sq_g * underestimate_penalty_g
+                    
+                    loss_stress_g = stress_error_masked_g.sum() / (stress_mask_g.sum() + 1e-8) + zero_penalty_g + under_penalty_g
+                    
+                    loss_vel_per_graph.append(loss_vel_g)
+                    loss_stress_per_graph.append(loss_stress_g)
+                    
+                    node_offset += n_nodes_g
+                
+                # Average losses over valid graphs only (equal weight per trajectory)
+                # Use torch.stack to maintain gradients properly
+                if len(valid_graphs) > 0:
+                    loss_vel_tensors = torch.stack([loss_vel_per_graph[g] for g in valid_graphs])
+                    loss_stress_tensors = torch.stack([loss_stress_per_graph[g] for g in valid_graphs])
+                    loss_vel = loss_vel_tensors.mean()
+                    loss_stress = loss_stress_tensors.mean()
+                else:
+                    # Should not happen (we skip timestep if no valid graphs), but safety check
+                    loss_vel = torch.tensor(0.0, device=device, requires_grad=True)
+                    loss_stress = torch.tensor(0.0, device=device, requires_grad=True)
+            else:
+                # Standard batching mode: compute loss over all nodes (existing logic)
+                # Velocity loss: compute per-node, then mask and average (on NORMALIZED values)
+                # Both predictions and targets are in normalized space (O(1) magnitudes)
+                # Use velocity_mask: only node_type == 0 (NORMAL nodes)
+                vel_error = (pred_vel_norm - target_vel_t_norm) ** 2  # (B, N, 3)
+                vel_error_per_node = torch.sum(vel_error, dim=-1)  # (B, N)
+                vel_error_masked = vel_error_per_node * velocity_mask  # (B, N)
+                loss_vel = vel_error_masked.sum() / (velocity_mask.sum() + 1e-8)  # Average over masked nodes
+                
+                # Stress loss: compute per-node, then mask and average (on NORMALIZED values)
+                # Use stress_mask: node_type == 0 (NORMAL) OR node_type == 3 (HANDLE)
+                # Velocity loss uses velocity_mask: only node_type == 0 (NORMAL nodes)
+                # Boundary nodes (node_type == 1, OBSTACLE) are fixed and should not contribute to loss
+                stress_error = (pred_stress_norm.squeeze(-1) - target_stress_t_norm) ** 2  # (B, N) - ensure shapes match
+                stress_error_masked = stress_error * stress_mask  # (B, N) - use NORMAL or HANDLE nodes (node_type == 0 or 3)
+                
+                # CRITICAL FIX: Add penalty for predicting zero or very small stress when true stress is non-zero
+                # This prevents the model from learning to predict zero for boundary NORMAL nodes
+                # Only apply penalty to NORMAL nodes with non-zero true stress
+                target_stress_nonzero = (target_stress_t_norm.abs() > 1e-6).float()  # (B, N) - nodes with non-zero true stress
+                pred_stress_abs = pred_stress_norm.squeeze(-1).abs()  # (B, N) - absolute predicted stress
+                
+                # Penalty 1: Predictions that are exactly zero or very near zero (< 0.01 in normalized space)
+                # This corresponds to ~0.01 * stress_std in original space, which is very small
+                pred_stress_near_zero = (pred_stress_abs < 0.01).float()  # (B, N) - predictions near zero
+                zero_prediction_penalty = (target_stress_nonzero * pred_stress_near_zero * stress_mask).sum() / (stress_mask.sum() + 1e-8)
+                
+                # Penalty 2: Predictions that are significantly smaller than target (underestimation)
+                # If target is large but prediction is small, add penalty
+                # Only penalize when prediction < 0.1 * target (severe underestimation)
+                target_stress_abs = target_stress_t_norm.abs()  # (B, N)
+                severe_underestimate = (pred_stress_abs < 0.1 * target_stress_abs) & (target_stress_abs > 0.1)  # (B, N)
+                underestimate_penalty = (severe_underestimate.float() * stress_mask).sum() / (stress_mask.sum() + 1e-8)
+                
+                # Scale penalties to be comparable to MSE
+                penalty_weight_zero = 1.0  # stronger penalty for zero predictions
+                penalty_weight_under = 0.5  # Weight for underestimation penalty
+                mean_target_sq = (target_stress_t_norm ** 2 * stress_mask).sum() / (stress_mask.sum() + 1e-8)
+                zero_penalty = penalty_weight_zero * mean_target_sq * zero_prediction_penalty
+                under_penalty = penalty_weight_under * mean_target_sq * underestimate_penalty
+                
+                # Normalize by weighted mask sum to account for boundary node weighting
+                loss_stress = stress_error_masked.sum() / (stress_mask.sum() + 1e-8) + zero_penalty + under_penalty  # Average over plate nodes + penalties
             
             # CRITICAL DEBUG: Check if stress predictions are uniform BEFORE computing loss
             if batch_idx == 0 and valid_timesteps == 1:
@@ -843,9 +1193,36 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
                     print(f"     Possible causes: vanishing gradients, dead ReLU, or initialization issue.")
             
             # CRITICAL DEBUG: Check stress predictions vs targets in normalized space
+            # Also check boundary nodes specifically
             if batch_idx == 0 and valid_timesteps == 1:
                 pred_stress_norm_masked = pred_stress_norm.squeeze(-1)[stress_mask > 0]  # (num_masked,)
                 target_stress_norm_masked = target_stress_t_norm[stress_mask > 0]  # (num_masked,)
+                
+                # Identify boundary nodes by checking node positions (NORMAL nodes at edges)
+                # This is approximate - we check if nodes are near min/max positions
+                coors_t_minus_1_flat = coors_t_minus_1[0]  # (N, 3) - remove batch dim
+                x_min, x_max = coors_t_minus_1_flat[:, 0].min(), coors_t_minus_1_flat[:, 0].max()
+                y_min, y_max = coors_t_minus_1_flat[:, 1].min(), coors_t_minus_1_flat[:, 1].max()
+                z_min, z_max = coors_t_minus_1_flat[:, 2].min(), coors_t_minus_1_flat[:, 2].max()
+                x_range, y_range, z_range = x_max - x_min, y_max - y_min, z_max - z_min
+                tol = 0.02  # 2% tolerance for boundary detection
+                
+                boundary_x = ((coors_t_minus_1_flat[:, 0] - x_min) < tol * x_range) | ((x_max - coors_t_minus_1_flat[:, 0]) < tol * x_range)
+                boundary_y = ((coors_t_minus_1_flat[:, 1] - y_min) < tol * y_range) | ((y_max - coors_t_minus_1_flat[:, 1]) < tol * y_range)
+                boundary_z = ((coors_t_minus_1_flat[:, 2] - z_min) < tol * z_range) | ((z_max - coors_t_minus_1_flat[:, 2]) < tol * z_range)
+                boundary_mask = (boundary_x | boundary_y | boundary_z).float()  # (N,)
+                boundary_normal_mask = boundary_mask * stress_mask[0]  # (N,) - boundary NORMAL nodes
+                
+                if boundary_normal_mask.sum() > 0:
+                    boundary_pred = pred_stress_norm.squeeze(-1)[0][boundary_normal_mask > 0.5]  # (num_boundary,)
+                    boundary_target = target_stress_t_norm[0][boundary_normal_mask > 0.5]  # (num_boundary,)
+                    boundary_zero_pred = (boundary_pred.abs() < 0.01).sum().item()
+                    boundary_total = len(boundary_pred)
+                    
+                    print(f"  Boundary NORMAL nodes: {boundary_total}, zero predictions: {boundary_zero_pred} ({100*boundary_zero_pred/max(boundary_total,1):.1f}%)")
+                    if boundary_total > 0:
+                        print(f"    Boundary pred: min={boundary_pred.min().item():.4f}, max={boundary_pred.max().item():.4f}, mean={boundary_pred.mean().item():.4f}")
+                        print(f"    Boundary target: min={boundary_target.min().item():.4f}, max={boundary_target.max().item():.4f}, mean={boundary_target.mean().item():.4f}")
                 
                 
                 if pred_stress_norm_masked.numel() > 0:
@@ -978,6 +1355,59 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
                 
                 print("==================================\n")
         
+        # Compute rollout errors on denormalized values (last 1 and last 50 timesteps)
+        if len(rollout_pred_vel) > 0:
+            # Stack all stored predictions and targets
+            # Each is a list of (B, N, ...) tensors
+            num_stored_timesteps = len(rollout_pred_vel)
+            
+            # Compute errors for last 1 and last 50 timesteps
+            for horizon in [1, 50]:
+                if num_stored_timesteps >= horizon:
+                    # Get last 'horizon' timesteps
+                    last_pred_vel = rollout_pred_vel[-horizon:]  # List of (B, N, 3)
+                    last_pred_stress = rollout_pred_stress[-horizon:]  # List of (B, N, 1)
+                    last_target_vel = rollout_target_vel[-horizon:]  # List of (B, N, 3)
+                    last_target_stress = rollout_target_stress[-horizon:]  # List of (B, N, 1)
+                    last_velocity_mask = rollout_velocity_mask_list[-horizon:]  # List of (B, N)
+                    last_stress_mask = rollout_stress_mask_list[-horizon:]  # List of (B, N)
+                    
+                    # Compute velocity error (only on masked nodes)
+                    vel_errors = []
+                    stress_errors = []
+                    
+                    for i in range(horizon):
+                        pred_v = last_pred_vel[i]  # (B, N, 3)
+                        target_v = last_target_vel[i]  # (B, N, 3)
+                        vel_mask = last_velocity_mask[i]  # (B, N)
+                        
+                        pred_s = last_pred_stress[i]  # (B, N, 1)
+                        target_s = last_target_stress[i]  # (B, N, 1)
+                        stress_mask = last_stress_mask[i]  # (B, N)
+                        
+                        # Velocity error: MSE on masked nodes only
+                        vel_error = (pred_v - target_v) ** 2  # (B, N, 3)
+                        vel_error_per_node = torch.sum(vel_error, dim=-1)  # (B, N)
+                        vel_error_masked = vel_error_per_node * vel_mask  # (B, N)
+                        if vel_mask.sum() > 0:
+                            vel_errors.append(vel_error_masked.sum().item() / vel_mask.sum().item())
+                        
+                        # Stress error: MSE on masked nodes only
+                        stress_error = (pred_s.squeeze(-1) - target_s.squeeze(-1)) ** 2  # (B, N)
+                        stress_error_masked = stress_error * stress_mask  # (B, N)
+                        if stress_mask.sum() > 0:
+                            stress_errors.append(stress_error_masked.sum().item() / stress_mask.sum().item())
+                    
+                    # Average errors over the horizon
+                    avg_vel_error = np.mean(vel_errors) if len(vel_errors) > 0 else 0.0
+                    avg_stress_error = np.mean(stress_errors) if len(stress_errors) > 0 else 0.0
+                    
+                    # Display rollout errors (only for first batch of each epoch to avoid clutter)
+                    if batch_idx == 0:
+                        print(f"  Rollout error (denormalized, last {horizon} timestep{'s' if horizon > 1 else ''}):")
+                        print(f"    Velocity MSE: {avg_vel_error:.6f} m²/s²")
+                        print(f"    Stress MSE: {avg_stress_error:.6f} Pa²")
+        
         # Gradient clipping and optimizer step after all timesteps in sequence
         if valid_timesteps > 0:  # Only step if we had valid timesteps
             # Average losses over valid timesteps for reporting
@@ -1078,12 +1508,24 @@ def main():
         dataset_fraction=args.dataset_fraction
     )
     
+    # Ensure custom_collate_fn is callable
+    if not callable(custom_collate_fn):
+        raise TypeError(f"custom_collate_fn must be callable, got {type(custom_collate_fn)}")
+    
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=True,
-        num_workers=0  # Set to 0 to avoid issues with tfrecord loading
+        num_workers=0,  # Set to 0 to avoid issues with tfrecord loading
+        collate_fn=custom_collate_fn  # Handle variable-sized graphs
     )
+    
+    # Verify the DataLoader is using our custom collate function
+    if dataloader.collate_fn is not custom_collate_fn:
+        raise RuntimeError(
+            f"DataLoader is not using custom_collate_fn! "
+            f"Expected {custom_collate_fn}, got {dataloader.collate_fn}"
+        )
     
     # Save normalization statistics to JSON file for consistency
     norm_stats_path = os.path.join(args.checkpoint_dir, 'norm_stats.json')
@@ -1115,7 +1557,8 @@ def main():
             eval_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=0
+            num_workers=0,
+            collate_fn=custom_collate_fn  # Handle variable-sized graphs
         )
     else:
         eval_dataset = None
