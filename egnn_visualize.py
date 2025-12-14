@@ -1,5 +1,5 @@
 import os
-# Fix OpenMP conflict on macOS (must be set before importing torch/numpy)
+# Fix OpenMP conflict on macOS
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import yaml
@@ -16,9 +16,9 @@ from model_egnn import MeshEGNN
 from egnn_transform import OverwriteKinematicVelocity, AddDynamicWorldEdges
 
 # Constants
-SPHERE_NODE = 1  # [1, 0] in One-Hot
-BOUNDARY_NODE = 3 # [0, 1] in One-Hot
-NORMAL_NODE = 0   # [0, 0] in One-Hot
+SPHERE_NODE = 1  
+BOUNDARY_NODE = 3
+NORMAL_NODE = 0 
 
 def load_config(path):
     with open(path, "r") as f: return yaml.safe_load(f)
@@ -27,7 +27,6 @@ def make_wireframe(x, y, z, i, j, k):
     """Efficient wireframe generation for Plotly"""
     tri_points = np.vstack([i, j, k, i, np.full_like(i, -1)]).T.flatten()
     xe, ye, ze = x[tri_points], y[tri_points], z[tri_points]
-    # Insert None to break lines
     xe[4::5] = ye[4::5] = ze[4::5] = None
     
     return go.Scatter3d(
@@ -37,58 +36,133 @@ def make_wireframe(x, y, z, i, j, k):
         showlegend=False, hoverinfo='skip'
     )
 
-def visualize_step(pos_true, pos_pred, cells, stress_true, stress_pred, title):
-    # Triangulate cells [C, 4] -> [Triangles]
-    # Quad splitting (0,1,2,3) -> (0,1,2) & (0,2,3)
+def visualize_rollout_animation(pos_true_seq, pos_pred_seq, cells, stress_true_seq, stress_pred_seq, title, output_path):
+    """
+    Creates a single HTML file with a time slider to play the rollout animation.
+    """
+    print(f"Generating animation for {len(pos_true_seq)} steps...")
+    
+    # Triangulate cells
     c0, c1, c2, c3 = cells[:,0], cells[:,1], cells[:,2], cells[:,3]
     tri_i = np.concatenate([c0, c0])
     tri_j = np.concatenate([c1, c2])
     tri_k = np.concatenate([c2, c3])
 
+    # Global Color Range (Fixed across time for consistency)
+    # Convert lists to single numpy array for min/max
+    all_s_true = np.concatenate(stress_true_seq)
+    all_s_pred = np.concatenate(stress_pred_seq)
+    cmin, cmax = 0, max(all_s_true.max(), all_s_pred.max())
+
+    # Create Initial Figure
     fig = make_subplots(
         rows=1, cols=2, 
         specs=[[{'type': 'scene'}, {'type': 'scene'}]],
         subplot_titles=("Ground Truth", "Prediction")
     )
-    
-    # Shared Color Range
-    cmin, cmax = 0, max(stress_true.max(), stress_pred.max())
-    
-    # 1. Ground Truth
-    fig.add_trace(go.Mesh3d(
-        x=pos_true[:,0], y=pos_true[:,1], z=pos_true[:,2],
-        i=tri_i, j=tri_j, k=tri_k,
-        intensity=stress_true, colorscale='Viridis', 
-        cmin=cmin, cmax=cmax, name='True', opacity=0.9
-    ), row=1, col=1)
-    
-    fig.add_trace(make_wireframe(pos_true[:,0], pos_true[:,1], pos_true[:,2], tri_i, tri_j, tri_k), row=1, col=1)
 
-    # 2. Prediction
-    fig.add_trace(go.Mesh3d(
-        x=pos_pred[:,0], y=pos_pred[:,1], z=pos_pred[:,2],
-        i=tri_i, j=tri_j, k=tri_k,
-        intensity=stress_pred, colorscale='Viridis', 
-        cmin=cmin, cmax=cmax, name='Pred', opacity=0.9
-    ), row=1, col=2)
-    
-    fig.add_trace(make_wireframe(pos_pred[:,0], pos_pred[:,1], pos_pred[:,2], tri_i, tri_j, tri_k), row=1, col=2)
+    # --- Helper to create traces for a specific step ---
+    def get_traces(t):
+        p_t = pos_true_seq[t]
+        p_p = pos_pred_seq[t]
+        s_t = stress_true_seq[t]
+        s_p = stress_pred_seq[t]
+        
+        # 1. True Surface
+        t1 = go.Mesh3d(x=p_t[:,0], y=p_t[:,1], z=p_t[:,2], i=tri_i, j=tri_j, k=tri_k,
+                       intensity=s_t, colorscale='Viridis', cmin=cmin, cmax=cmax, name='True')
+        # 2. True Wireframe
+        t2 = make_wireframe(p_t[:,0], p_t[:,1], p_t[:,2], tri_i, tri_j, tri_k)
+        
+        # 3. Pred Surface
+        t3 = go.Mesh3d(x=p_p[:,0], y=p_p[:,1], z=p_p[:,2], i=tri_i, j=tri_j, k=tri_k,
+                       intensity=s_p, colorscale='Viridis', cmin=cmin, cmax=cmax, name='Pred')
+        # 4. Pred Wireframe
+        t4 = make_wireframe(p_p[:,0], p_p[:,1], p_p[:,2], tri_i, tri_j, tri_k)
+        
+        return [t1, t2, t3, t4]
 
-    fig.update_layout(title=title, height=600, width=1200)
+    # Add Initial Data (Step 0)
+    for trace in get_traces(0):
+        fig.add_trace(trace)
+
+    # --- Create Frames for Animation ---
+    frames = []
+    steps = len(pos_true_seq)
+    for t in range(steps):
+        # Only update the data arrays, reuse layout properties
+        # Order must match the add_trace order: [MeshT, WireT, MeshP, WireP]
+        
+        # Pre-calculate wireframe arrays
+        p_t = pos_true_seq[t]
+        wire_t = make_wireframe(p_t[:,0], p_t[:,1], p_t[:,2], tri_i, tri_j, tri_k)
+        
+        p_p = pos_pred_seq[t]
+        wire_p = make_wireframe(p_p[:,0], p_p[:,1], p_p[:,2], tri_i, tri_j, tri_k)
+        
+        frames.append(go.Frame(
+            data=[
+                # Update Trace 0 (True Mesh)
+                go.Mesh3d(x=p_t[:,0], y=p_t[:,1], z=p_t[:,2], intensity=stress_true_seq[t]),
+                # Update Trace 1 (True Wire)
+                go.Scatter3d(x=wire_t.x, y=wire_t.y, z=wire_t.z),
+                # Update Trace 2 (Pred Mesh)
+                go.Mesh3d(x=p_p[:,0], y=p_p[:,1], z=p_p[:,2], intensity=stress_pred_seq[t]),
+                # Update Trace 3 (Pred Wire)
+                go.Scatter3d(x=wire_p.x, y=wire_p.y, z=wire_p.z)
+            ],
+            name=str(t)
+        ))
+
+    fig.frames = frames
+
+    # --- Add Slider and Buttons ---
+    fig.update_layout(
+        title=title, height=600, width=1200,
+        updatemenus=[{
+            "buttons": [
+                {
+                    "args": [None, {"frame": {"duration": 100, "redraw": True}, "fromcurrent": True}],
+                    "label": "Play",
+                    "method": "animate"
+                },
+                {
+                    "args": [[None], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate", "transition": {"duration": 0}}],
+                    "label": "Pause",
+                    "method": "animate"
+                }
+            ],
+            "direction": "left",
+            "pad": {"r": 10, "t": 87},
+            "showactive": False,
+            "type": "buttons",
+            "x": 0.1, "xanchor": "right", "y": 0, "yanchor": "top"
+        }],
+        sliders=[{
+            "active": 0,
+            "yanchor": "top", "xanchor": "left",
+            "currentvalue": {"font": {"size": 20}, "prefix": "Step:", "visible": True, "xanchor": "right"},
+            "transition": {"duration": 300, "easing": "cubic-in-out"},
+            "pad": {"b": 10, "t": 50},
+            "len": 0.9, "x": 0.1, "y": 0,
+            "steps": [{"args": [[str(k)], {"frame": {"duration": 300, "redraw": True}, "mode": "immediate", "transition": {"duration": 300}}], "label": str(k), "method": "animate"} for k in range(steps)]
+        }]
+    )
+
+    # Fix camera aspect ratio
+    fig.update_layout(scene_aspectmode='data', scene2_aspectmode='data')
     
-    # Save to HTML file for viewing
-    os.makedirs("plots", exist_ok=True)
-    filename = title.lower().replace(" ", "_") + ".html"
-    filepath = os.path.join("plots", filename)
-    fig.write_html(filepath)
-    print(f"Plot saved to: {filepath}")
+    # Save
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.write_html(output_path)
+    print(f"Animation saved to: {output_path}")
     
-    # Also try to show in browser
+    # Try to open
     try:
-        fig.show()
-    except Exception as e:
-        print(f"Could not display plot in browser: {e}")
-        print(f"Please open {filepath} in your web browser to view the plot.")
+        import webbrowser
+        webbrowser.open('file://' + os.path.abspath(output_path))
+    except:
+        pass
 
 def rollout(model, dataset, traj_idx, steps, device):
     # Load trajectory from RAM cache
@@ -122,21 +196,12 @@ def rollout(model, dataset, traj_idx, steps, device):
     
     for t in range(steps):
         # 1. Normalize Input
-        # (x - mean) / std
         x_norm = (curr_x_raw - mean_feat) / std_feat
         
         # 2. Prepare Data Object (for Transforms)
         data = Data(x=x_norm, edge_index=edge_index, node_type=node_type, batch=None)
         
         # Inject Future Velocity from GT (Clairvoyant Physics)
-        # We need y_norm for the transform to work
-        # Transform expects y to be normalized? Or raw?
-        # Check egnn_transforms.py: It reads data.y.
-        # Check egnn_train.py: y is Raw until inside loop.
-        # But transform runs BEFORE normalization usually. 
-        # In egnn_data.py, we normalized x and y.
-        # So here 'data.y' should be normalized target.
-        
         if t + 1 < len(y_seq_raw):
             y_next_raw = y_seq_raw[t+1]
             y_next_norm = (y_next_raw - mean_targ) / std_targ
@@ -149,17 +214,13 @@ def rollout(model, dataset, traj_idx, steps, device):
         
         # 3. Model Inference
         with torch.no_grad():
-            # x is normalized features
-            # pos needs to be normalized too (it is part of x[:, 0:3])
             pred_vel_norm, pred_stress_norm = model(data.x, data.x[:, 0:3], data.edge_index)
             
         # 4. Denormalize Predictions
-        # Vel is indices 0:3 of Target, Stress is 3
         pred_vel = pred_vel_norm * std_targ[0:3] + mean_targ[0:3]
         pred_stress = pred_stress_norm * std_targ[3] + mean_targ[3]
         
         # 5. Physics Integration (Euler)
-        # pos_next = pos_curr + v_pred
         pos_curr = curr_x_raw[:, 0:3]
         pos_next = pos_curr + pred_vel
         
@@ -168,33 +229,30 @@ def rollout(model, dataset, traj_idx, steps, device):
         pos_next[sphere_mask] = gt_pos_next[sphere_mask]
         
         # 7. Update State for Next Step
-        # x_raw structure: [Pos(3), Vel(3), Type(2), Stress(1)]
         curr_x_raw[:, 0:3] = pos_next
-        curr_x_raw[:, 3:6] = pred_vel # Autoregressive Velocity
-        # Type is constant
-        curr_x_raw[:, 8:9] = pred_stress # Autoregressive Stress
+        curr_x_raw[:, 3:6] = pred_vel 
+        curr_x_raw[:, 8:9] = pred_stress
         
-        # 8. Store Results
+        # 8. Store Results (Numpy)
         preds_pos.append(pos_next.cpu().numpy())
-        preds_stress.append(pred_stress.cpu().numpy())
+        preds_stress.append(pred_stress.cpu().numpy().flatten()) # Flatten for coloring
         
         targs_pos.append(gt_pos_next.cpu().numpy())
-        targs_stress.append(y_seq_raw[t+1, :, 3:4].cpu().numpy())
+        targs_stress.append(y_seq_raw[t+1, :, 3:4].cpu().numpy().flatten())
         
         # Error
         mse = torch.mean((pos_next - gt_pos_next)**2).item()
         errors_mse.append(mse)
 
     return preds_pos, preds_stress, targs_pos, targs_stress, errors_mse
+
 def main():
     cfg = load_config("config.yaml")
     device = torch.device(cfg['training']['device'])
     
     # --- CONFIG LOADING ---
-    viz_cfg = cfg.get('visualization', {}) # Fallback to empty dict if missing
-    start_step = viz_cfg.get('start_step', 0)
+    viz_cfg = cfg.get('visualization', {})
     rollout_len = viz_cfg.get('rollout_steps', 50)
-    render_t = viz_cfg.get('render_step', 40)
     
     # 1. Load Model
     model = MeshEGNN(
@@ -216,35 +274,19 @@ def main():
     
     # 3. Trajectory Selection
     train_mode = cfg['training'].get('mode', 'standard')
-    
     if train_mode == 'overfit':
         traj_idx = cfg['training']['overfit_traj_ids'][0]
-        print(f"Mode: Overfit. Visualizing Traj {traj_idx}")
-        dataset = EGNNTFRecordDataset(
-            data_dir=cfg['data']['data_dir'],
-            preprocessed_dir=cfg['data']['preprocessed_dir'],
-            allowed_traj_ids=[traj_idx],
-            transform=transform
-        )
+        allowed_traj_ids = [traj_idx]
     else:
-        # If config doesn't specify which traj to visualize in standard mode, default to 0
         traj_idx = viz_cfg.get('traj_idx', 0)
-        # Limit trajectories if max_trajs is set
-        max_trajs = cfg['data'].get('max_trajs')
-        allowed_traj_ids = None
-        if max_trajs is not None:
-            allowed_traj_ids = list(range(max_trajs))
-        elif traj_idx is not None:
-            # Ensure we load enough trajectories to get to traj_idx
-            allowed_traj_ids = list(range(traj_idx + 5))
+        allowed_traj_ids = list(range(traj_idx + 5))
         
-        print(f"Mode: Standard. Visualizing Traj {traj_idx}")
-        dataset = EGNNTFRecordDataset(
-            data_dir=cfg['data']['data_dir'],
-            preprocessed_dir=cfg['data']['preprocessed_dir'],
-            transform=transform,
-            allowed_traj_ids=allowed_traj_ids
-        )
+    dataset = EGNNTFRecordDataset(
+        data_dir=cfg['data']['data_dir'],
+        preprocessed_dir=cfg['data']['preprocessed_dir'],
+        transform=transform,
+        allowed_traj_ids=allowed_traj_ids
+    )
 
     # 4. Load Cells
     import json
@@ -262,43 +304,27 @@ def main():
             cells = decode(rec['cells'], meta["features"]["cells"]["shape"], np.int32)
             break
             
-    if cells is None:
-        raise ValueError(f"Cells not found for trajectory {traj_idx}")
+    if cells is None: raise ValueError(f"Cells not found for trajectory {traj_idx}")
 
     # 5. Rollout
     print(f"Running rollout for trajectory {traj_idx}, {rollout_len} steps...")
-    try:
-        p_pred, s_pred, p_true, s_true, errors = rollout(model, dataset, traj_idx, rollout_len, device)
-        print(f"Rollout completed. Generated {len(p_pred)} prediction steps.")
-        
-        # 6. Visualize
-        # Ensure we don't crash if rollout was shorter than requested render step
-        viz_t = min(render_t, len(p_pred)-1)
-        if viz_t < 0:
-            print("Error: No prediction steps generated!")
-            return
-        
-        print(f"Visualizing step {viz_t}. MSE: {errors[viz_t]:.6f}")
-        
-        visualize_step(
-            p_true[viz_t], p_pred[viz_t], cells, 
-            s_true[viz_t].flatten(), s_pred[viz_t].flatten(), 
-            title=f"EGNN Rollout Step {viz_t} (Traj {traj_idx})"
-        )
-        
-        # Plot error curve
-        fig_err = go.Figure()
-        fig_err.add_trace(go.Scatter(y=errors, mode='lines+markers', name='MSE'))
-        fig_err.update_layout(title=f"Rollout Error - Traj {traj_idx}")
-        os.makedirs("plots", exist_ok=True)
-        fig_err.write_html(os.path.join("plots", f"rollout_error_traj_{traj_idx}.html"))
-        fig_err.show()
-        
-        print("Visualization complete!")
-    except Exception as e:
-        print(f"Error during rollout or visualization: {e}")
-        import traceback
-        traceback.print_exc()
+    p_pred, s_pred, p_true, s_true, errors = rollout(model, dataset, traj_idx, rollout_len, device)
+    
+    # 6. Visualize Animation (ALL STEPS)
+    output_path = os.path.join("plots", f"animation_traj_{traj_idx}.html")
+    
+    visualize_rollout_animation(
+        p_true, p_pred, cells, s_true, s_pred, 
+        title=f"EGNN Physics Rollout (Traj {traj_idx})",
+        output_path=output_path
+    )
+    
+    # Plot error curve
+    fig_err = go.Figure()
+    fig_err.add_trace(go.Scatter(y=errors, mode='lines+markers', name='MSE'))
+    fig_err.update_layout(title=f"Rollout Error - Traj {traj_idx}", xaxis_title="Step", yaxis_title="MSE")
+    fig_err.write_html(os.path.join("plots", f"error_traj_{traj_idx}.html"))
+    fig_err.show()
 
 if __name__ == "__main__":
     main()
