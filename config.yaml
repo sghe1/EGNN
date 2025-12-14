@@ -18,6 +18,11 @@ training:
   batch_size: 16
   device: "cuda"
   seed: 42
+
+  visualization:
+  start_step: 0       # Where to start the rollout
+  rollout_steps: 50   # How many steps to simulate
+  render_step: 40     # Which step to actually plot (must be < rollout_steps)
   
   # --- RESTORED OVERFIT CONFIG ---
   mode: "standard"          # "standard" or "overfit"
