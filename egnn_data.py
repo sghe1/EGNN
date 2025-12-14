@@ -57,7 +57,7 @@ class EGNNTFRecordDataset(Dataset):
         if not os.path.exists(stats_path):
             raise FileNotFoundError(f"Stats not found at {stats_path}. Run egnn_preprocess.py first.")
 
-        stats = torch.load(stats_path, map_location="cpu")
+        stats = torch.load(stats_path, map_location="cpu", weights_only=False)
         self.mean_feat = stats["mean_feat"].float()
         self.std_feat = stats["std_feat"].float()
         self.mean_target = stats["mean_target"].float()
@@ -66,7 +66,7 @@ class EGNNTFRecordDataset(Dataset):
         self.feature_dim = FEATURE_DIM
         self.target_dim = TARGET_DIM
 
-        index_data = torch.load(index_path, map_location="cpu")
+        index_data = torch.load(index_path, map_location="cpu", weights_only=False)
         full_index_list = index_data["index"]
 
         # 2. Filtering Logic (Trajectory & Time)
@@ -90,10 +90,8 @@ class EGNNTFRecordDataset(Dataset):
         self._traj_cache = {} 
         
         if self.cache_all:
-            print(f"EGNN Dataset: Pre-loading {len(self.available_traj)} trajectories into RAM...")
             for tr_id in self.available_traj:
                 self._load_traj_to_cache(tr_id)
-            print("EGNN Dataset: All data loaded.")
 
     def __len__(self) -> int:
         return len(self.index_list)
@@ -106,7 +104,7 @@ class EGNNTFRecordDataset(Dataset):
         if not os.path.exists(traj_path):
             raise FileNotFoundError(f"Trajectory file missing: {traj_path}")
             
-        data = torch.load(traj_path, map_location="cpu")
+        data = torch.load(traj_path, map_location="cpu", weights_only=False)
         self._traj_cache[traj_idx] = data
         return data
 

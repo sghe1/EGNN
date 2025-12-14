@@ -1,4 +1,7 @@
 import os
+# Fix OpenMP conflict on macOS (must be set before importing torch/numpy)
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import yaml
 import torch
 import numpy as np
@@ -8,8 +11,8 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.transforms import Compose
 
 from egnn_data import EGNNTFRecordDataset
-from egnn_model import MeshEGNN
-from egnn_transforms import OverwriteKinematicVelocity, AddDynamicWorldEdges
+from model_egnn import MeshEGNN
+from egnn_transform import OverwriteKinematicVelocity, AddDynamicWorldEdges
 
 # Constants
 SPHERE_NODE = 1
@@ -50,7 +53,20 @@ def visualize_mesh_pair(pos_true, pos_pred, cells, stress_true, stress_pred, tit
     fig.add_trace(make_wireframe(pos_pred[:,0], pos_pred[:,1], pos_pred[:,2], tri_i, tri_j, tri_k), row=1, col=2)
 
     fig.update_layout(title=title, height=600, width=1200)
-    fig.show()
+    
+    # Save to HTML file for viewing
+    os.makedirs("plots", exist_ok=True)
+    filename = title.lower().replace(" ", "_") + ".html"
+    filepath = os.path.join("plots", filename)
+    fig.write_html(filepath)
+    print(f"Plot saved to: {filepath}")
+    
+    # Also try to show in browser
+    try:
+        fig.show()
+    except Exception as e:
+        print(f"Could not display plot in browser: {e}")
+        print(f"Please open {filepath} in your web browser to view the plot.")
 
 def rollout(model, dataset, traj_idx, steps, device):
     # Load single trajectory
@@ -156,10 +172,17 @@ def main():
         OverwriteKinematicVelocity(),
         AddDynamicWorldEdges(radius=cfg['data']['radius'])
     ])
+    # Limit trajectories if max_trajs is set
+    max_trajs = cfg['data'].get('max_trajs')
+    allowed_traj_ids = None
+    if max_trajs is not None:
+        allowed_traj_ids = list(range(max_trajs))
+    
     dataset = EGNNTFRecordDataset(
         data_dir=cfg['data']['data_dir'],
         preprocessed_dir=cfg['data']['preprocessed_dir'],
-        transform=transform
+        transform=transform,
+        allowed_traj_ids=allowed_traj_ids
     )
     
     # Load cells for viz (from meta)
@@ -174,20 +197,35 @@ def main():
     from tfrecord.reader import tfrecord_loader
     loader = tfrecord_loader(os.path.join(cfg['data']['data_dir'], "train.tfrecord"), None)
     rec = next(loader)
-    cells = np.frombuffer(rec['cells'], dtype=np.int32).reshape(-1, 4)
+    # Decode cells using the same method as preprocess
+    from egnn_preprocess import decode
+    cells = decode(rec['cells'], meta["features"]["cells"]["shape"], np.int32)
 
     # Run Rollout
     idx = 0 # Trajectory to visualize
     steps = 50
-    p_pred, s_pred, p_true, s_true = rollout(model, dataset, idx, steps, device)
-    
-    # Visualize Step 40
-    t = 40
-    visualize_mesh_pair(
-        p_true[t], p_pred[t], cells, 
-        s_true[t].flatten(), s_pred[t].flatten(), 
-        title=f"EGNN Rollout Step {t}"
-    )
+    print(f"Running rollout for trajectory {idx}, {steps} steps...")
+    try:
+        p_pred, s_pred, p_true, s_true = rollout(model, dataset, idx, steps, device)
+        print(f"Rollout completed. Generated {len(p_pred)} prediction steps.")
+        
+        # Visualize Step 40 (or last available step)
+        t = min(40, len(p_pred) - 1)
+        if t < 0:
+            print("Error: No prediction steps generated!")
+            return
+        
+        print(f"Visualizing step {t}...")
+        visualize_mesh_pair(
+            p_true[t], p_pred[t], cells, 
+            s_true[t].flatten(), s_pred[t].flatten(), 
+            title=f"EGNN Rollout Step {t}"
+        )
+        print("Visualization complete!")
+    except Exception as e:
+        print(f"Error during rollout or visualization: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

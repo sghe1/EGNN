@@ -580,6 +580,7 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
     all_true_vel = []
     all_true_stress = []
     all_true_pos = []
+    all_node_type_one_hot = []  # Store node_type_one_hot for masking in rollout evaluation
     
     os.makedirs(save_dir, exist_ok=True)
     
@@ -621,6 +622,23 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
             traj_true_vel = []
             traj_true_stress = []
             traj_true_pos = []
+            
+            # Extract node_type_one_hot from features (static, same for all timesteps)
+            # node_type_one_hot is at indices 6:8 in features
+            node_type_one_hot = feats_seq[:, 0, :, 6:8]  # (B, N, 2) - extract from t=0
+            # Remove batch dimension: always take first batch item (should be B=1 for single trajectory)
+            node_type_one_hot = node_type_one_hot[0]  # (N, 2) - ensure 2D shape
+            # Convert to numpy and ensure shape is (N, 2)
+            if isinstance(node_type_one_hot, torch.Tensor):
+                node_type_one_hot = node_type_one_hot.cpu().numpy()  # (N, 2)
+            else:
+                node_type_one_hot = np.array(node_type_one_hot, dtype=np.float32)  # (N, 2)
+            
+            # Ensure it's a numpy array with correct shape
+            assert isinstance(node_type_one_hot, np.ndarray), \
+                f"node_type_one_hot should be numpy array, got {type(node_type_one_hot)}"
+            assert node_type_one_hot.ndim == 2 and node_type_one_hot.shape[1] == 2, \
+                f"node_type_one_hot should be (N, 2), got {node_type_one_hot.shape}"
             
             # Initialize autoregressive state: start from t=0 ground truth
             # For autoregressive prediction, we'll update positions and features at each step
@@ -714,7 +732,7 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
                     torch.zeros_like(pred_stress_norm)  # Set to 0 for other nodes (OBSTACLE)
                 )  # (B, N, 1)
                 pred_stress_denorm = torch.clamp(pred_stress_denorm, min=0.0)  # Ensure stress >= 0 (von Mises stress)
-                pred_stress_denorm = pred_stress_denorm.unsqueeze(-1)  # (B, N, 1)
+                # Note: pred_stress_denorm is already (B, N, 1), no need for extra unsqueeze
                 
                 
                 # Denormalize positions for computing predicted coordinates
@@ -767,10 +785,12 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
             all_true_vel.append(traj_true_vel)
             all_true_stress.append(traj_true_stress)
             all_true_pos.append(traj_true_pos)
+            all_node_type_one_hot.append(node_type_one_hot)  # (N, 2) - already numpy array
     
     # Compute rollout errors for t=1 and t=50 (denormalized values)
     # Rollout error: MSE on velocity and stress for specific timesteps
     # Note: Predictions start from t=1 (index 0 in prediction arrays)
+    # Use masking consistent with training: velocity on NORMAL nodes, stress on NORMAL or HANDLE nodes
     rollout_errors = {'t1': {'vel': [], 'stress': []}, 't50': {'vel': [], 'stress': []}}
     
     for traj_idx in range(len(all_pred_vel)):
@@ -778,21 +798,77 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
         pred_stress = all_pred_stress[traj_idx]  # (T, N, 1) - denormalized
         true_vel = all_true_vel[traj_idx]  # (T, N, 3) - denormalized
         true_stress = all_true_stress[traj_idx]  # (T, N, 1) - denormalized
+        node_type_one_hot = all_node_type_one_hot[traj_idx]  # (N, 2) - node type encoding
         
         T_pred = pred_vel.shape[0]
+        N = pred_vel.shape[1]
+        
+        # Verify shapes match
+        assert pred_vel.shape[1] == N, f"pred_vel N mismatch: {pred_vel.shape[1]} != {N}"
+        assert pred_stress.shape[1] == N, f"pred_stress N mismatch: {pred_stress.shape[1]} != {N}"
+        assert true_vel.shape[1] == N, f"true_vel N mismatch: {true_vel.shape[1]} != {N}"
+        assert true_stress.shape[1] == N, f"true_stress N mismatch: {true_stress.shape[1]} != {N}"
+        
+        # Create masks using same logic as training
+        # Encoding: 0 (NORMAL) -> [0, 0], 1 (OBSTACLE) -> [1, 0], 3 (HANDLE) -> [0, 1]
+        tolerance = 1e-6
+        
+        # Ensure node_type_one_hot is a numpy array (it should already be from extraction, but handle edge cases)
+        if isinstance(node_type_one_hot, torch.Tensor):
+            node_type_one_hot_array = node_type_one_hot.cpu().numpy().astype(np.float32)  # (N, 2)
+        else:
+            node_type_one_hot_array = np.array(node_type_one_hot, dtype=np.float32)  # (N, 2)
+        
+        # Ensure node_type_one_hot_array is 2D with shape (N, 2)
+        if node_type_one_hot_array.ndim == 1:
+            # If somehow 1D, reshape to (1, 2) then expand
+            node_type_one_hot_array = node_type_one_hot_array.reshape(-1, 2)
+        elif node_type_one_hot_array.ndim > 2:
+            # Flatten extra dimensions
+            node_type_one_hot_array = node_type_one_hot_array.reshape(-1, 2)
+        
+        N_nodes = node_type_one_hot_array.shape[0]
+        assert node_type_one_hot_array.shape == (N_nodes, 2), \
+            f"node_type_one_hot_array should be (N, 2), got {node_type_one_hot_array.shape}"
+        
+        # Velocity mask: only node_type == 0 (NORMAL nodes)
+        # Shape: (N,)
+        velocity_mask = ((np.abs(node_type_one_hot_array[:, 0]) < tolerance) & 
+                        (np.abs(node_type_one_hot_array[:, 1]) < tolerance)).astype(np.float32)  # (N,)
+        
+        # Stress mask: node_type == 0 (NORMAL) OR node_type == 3 (HANDLE)
+        # node_type == 0: [0, 0], node_type == 3: [0, 1] -> both have one_hot[0] ≈ 0
+        # Shape: (N,)
+        stress_mask = (np.abs(node_type_one_hot_array[:, 0]) < tolerance).astype(np.float32)  # (N,)
+        
+        # Verify mask shapes match number of nodes
+        assert velocity_mask.shape == (N_nodes,), \
+            f"velocity_mask should be (N,), got {velocity_mask.shape}, N={N_nodes}"
+        assert stress_mask.shape == (N_nodes,), \
+            f"stress_mask should be (N,), got {stress_mask.shape}, N={N_nodes}"
+        
+        # Verify mask N matches prediction N
+        if N_nodes != N:
+            raise ValueError(
+                f"Node count mismatch: node_type_one_hot has {N_nodes} nodes, "
+                f"but predictions have {N} nodes. This suggests a data inconsistency."
+            )
         
         # Compute error for t=1 (first predicted timestep, index 0)
         if T_pred >= 1:
             t1_idx = 0  # First predicted timestep corresponds to t=1
             
-            # Velocity error at t=1
+            # Velocity error at t=1 (masked)
             vel_error_t1 = (pred_vel[t1_idx] - true_vel[t1_idx]) ** 2  # (N, 3)
-            vel_mse_t1 = np.mean(vel_error_t1)  # Scalar
+            vel_error_per_node_t1 = np.sum(vel_error_t1, axis=-1)  # (N,)
+            vel_error_masked_t1 = vel_error_per_node_t1 * velocity_mask  # (N,)
+            vel_mse_t1 = np.sum(vel_error_masked_t1) / (np.sum(velocity_mask) + 1e-8)  # Scalar
             rollout_errors['t1']['vel'].append(vel_mse_t1)
             
-            # Stress error at t=1
-            stress_error_t1 = (pred_stress[t1_idx] - true_stress[t1_idx]) ** 2  # (N, 1)
-            stress_mse_t1 = np.mean(stress_error_t1)  # Scalar
+            # Stress error at t=1 (masked)
+            stress_error_t1 = (pred_stress[t1_idx].squeeze(-1) - true_stress[t1_idx].squeeze(-1)) ** 2  # (N,)
+            stress_error_masked_t1 = stress_error_t1 * stress_mask  # (N,)
+            stress_mse_t1 = np.sum(stress_error_masked_t1) / (np.sum(stress_mask) + 1e-8)  # Scalar
             rollout_errors['t1']['stress'].append(stress_mse_t1)
         
         # Compute error for t=50 (index 49 if available, otherwise use last timestep)
@@ -804,37 +880,44 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
             t50_idx = None
         
         if t50_idx is not None:
-            # Velocity error at t=50 (or last timestep)
+            # Velocity error at t=50 (or last timestep, masked)
             vel_error_t50 = (pred_vel[t50_idx] - true_vel[t50_idx]) ** 2  # (N, 3)
-            vel_mse_t50 = np.mean(vel_error_t50)  # Scalar
+            vel_error_per_node_t50 = np.sum(vel_error_t50, axis=-1)  # (N,)
+            vel_error_masked_t50 = vel_error_per_node_t50 * velocity_mask  # (N,)
+            vel_mse_t50 = np.sum(vel_error_masked_t50) / (np.sum(velocity_mask) + 1e-8)  # Scalar
             rollout_errors['t50']['vel'].append(vel_mse_t50)
             
-            # Stress error at t=50 (or last timestep)
-            stress_error_t50 = (pred_stress[t50_idx] - true_stress[t50_idx]) ** 2  # (N, 1)
-            stress_mse_t50 = np.mean(stress_error_t50)  # Scalar
+            # Stress error at t=50 (or last timestep, masked)
+            stress_error_t50 = (pred_stress[t50_idx].squeeze(-1) - true_stress[t50_idx].squeeze(-1)) ** 2  # (N,)
+            stress_error_masked_t50 = stress_error_t50 * stress_mask  # (N,)
+            stress_mse_t50 = np.sum(stress_error_masked_t50) / (np.sum(stress_mask) + 1e-8)  # Scalar
             rollout_errors['t50']['stress'].append(stress_mse_t50)
     
     # Compute and print average rollout errors
-    print(f"\n  === ROLLOUT ERRORS (Evaluation, Denormalized) ===")
+    print(f"\n  === ROLLOUT ERRORS (Evaluation, Denormalized, Masked) ===")
     
     if len(rollout_errors['t1']['vel']) > 0:
         avg_vel_t1 = np.mean(rollout_errors['t1']['vel'])
         avg_stress_t1 = np.mean(rollout_errors['t1']['stress'])
+        stress_rmse_t1 = np.sqrt(avg_stress_t1)  # RMSE in Pascals
         print(f"  t=1 (first timestep):")
         print(f"    Velocity MSE: {avg_vel_t1:.6f} m²/s²")
         print(f"    Stress MSE: {avg_stress_t1:.6f} Pa²")
+        print(f"    Stress RMSE: {stress_rmse_t1:.6f} Pa")
     else:
         print(f"  t=1: No valid timesteps")
     
     if len(rollout_errors['t50']['vel']) > 0:
         avg_vel_t50 = np.mean(rollout_errors['t50']['vel'])
         avg_stress_t50 = np.mean(rollout_errors['t50']['stress'])
+        stress_rmse_t50 = np.sqrt(avg_stress_t50)  # RMSE in Pascals
         # Check if all trajectories have at least 50 timesteps
         all_have_50 = all(len(pred) >= 50 for pred in all_pred_vel)
         actual_t = 50 if all_have_50 else f"last (T={max(len(pred) for pred in all_pred_vel)})"
         print(f"  t={actual_t}:")
         print(f"    Velocity MSE: {avg_vel_t50:.6f} m²/s²")
         print(f"    Stress MSE: {avg_stress_t50:.6f} Pa²")
+        print(f"    Stress RMSE: {stress_rmse_t50:.6f} Pa")
     else:
         print(f"  t=50: No valid timesteps")
     

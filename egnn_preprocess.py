@@ -17,19 +17,52 @@ def decode(val, shape, dtype):
 def build_static_edges(cells):
     pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
     edges = set()
+    # Ensure cells is a numpy array and iterate properly
+    cells = np.asarray(cells)
     for c in cells:
-        for i,j in pairs:
-            u,v = c[i], c[j]
-            if u!=v: edges.update([(u,v), (v,u)])
+        # Ensure c is 1D and extract indices
+        c_flat = np.asarray(c).flatten()
+        for i, j in pairs:
+            # Extract scalar values safely
+            u = int(c_flat[i])
+            v = int(c_flat[j])
+            if u != v: 
+                edges.update([(u, v), (v, u)])
     return torch.tensor(sorted(list(edges)), dtype=torch.long).t()
 
 def preprocess(cfg):
     d_cfg = cfg['data']
     raw, out = d_cfg['data_dir'], d_cfg['preprocessed_dir']
+    
+    # Resolve paths relative to script location, not current working directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(raw):
+        raw = os.path.normpath(os.path.join(script_dir, raw))
+    if not os.path.isabs(out):
+        out = os.path.normpath(os.path.join(script_dir, out))
+    
     os.makedirs(out, exist_ok=True)
     
-    with open(os.path.join(raw, "meta.json")) as f: meta = json.load(f)
-    loader = tfrecord_loader(os.path.join(raw, f"{d_cfg['split']}.tfrecord"), None)
+    meta_path = os.path.join(raw, "meta.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"meta.json not found at: {meta_path}\n"
+            f"Config data_dir: {d_cfg['data_dir']}\n"
+            f"Script directory: {script_dir}\n"
+            f"Resolved path: {raw}"
+        )
+    
+    with open(meta_path) as f: meta = json.load(f)
+    
+    tfrecord_path = os.path.join(raw, f"{d_cfg['split']}.tfrecord")
+    if not os.path.exists(tfrecord_path):
+        raise FileNotFoundError(
+            f"TFRecord file not found at: {tfrecord_path}\n"
+            f"Config split: {d_cfg['split']}\n"
+            f"Resolved data_dir: {raw}"
+        )
+    
+    loader = tfrecord_loader(tfrecord_path, None)
     
     # Stats Accumulators
     sum_f, sq_f = torch.zeros(FEATURE_DIM).double(), torch.zeros(FEATURE_DIM).double()

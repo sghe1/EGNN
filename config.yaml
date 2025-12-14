@@ -6,20 +6,20 @@ model:
   attention: true
 
 data:
-  data_dir: "../pytorch_model/raw_data"
+  data_dir: "data/deforming_plate"
   preprocessed_dir: "egnn_preprocessed"
   split: "train"
-  max_trajs: null
+  max_trajs: 1
   radius: 0.03
 
 training:
   lr: 0.0001
   epochs: 500
-  batch_size: 16
-  device: "cuda"
+  batch_size: 1
+  device: "cpu"  # Use "cuda" if you have a CUDA-enabled GPU, "cpu" for macOS/CPU-only systems
   seed: 42
   
   # --- RESTORED OVERFIT CONFIG ---
-  mode: "standard"          # "standard" or "overfit"
+  mode: "overfit"          # "standard" or "overfit"
   overfit_traj_ids: [0]     # Which trajectory to memorize
   overfit_time_ids: [0,1,2] # Which time steps to memorize
