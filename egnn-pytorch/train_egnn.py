@@ -768,6 +768,78 @@ def save_predictions(model, dataloader, device, save_dir, epoch, dataset=None, n
             all_true_stress.append(traj_true_stress)
             all_true_pos.append(traj_true_pos)
     
+    # Compute rollout errors for t=1 and t=50 (denormalized values)
+    # Rollout error: MSE on velocity and stress for specific timesteps
+    # Note: Predictions start from t=1 (index 0 in prediction arrays)
+    rollout_errors = {'t1': {'vel': [], 'stress': []}, 't50': {'vel': [], 'stress': []}}
+    
+    for traj_idx in range(len(all_pred_vel)):
+        pred_vel = all_pred_vel[traj_idx]  # (T, N, 3) - denormalized, T predictions starting from t=1
+        pred_stress = all_pred_stress[traj_idx]  # (T, N, 1) - denormalized
+        true_vel = all_true_vel[traj_idx]  # (T, N, 3) - denormalized
+        true_stress = all_true_stress[traj_idx]  # (T, N, 1) - denormalized
+        
+        T_pred = pred_vel.shape[0]
+        
+        # Compute error for t=1 (first predicted timestep, index 0)
+        if T_pred >= 1:
+            t1_idx = 0  # First predicted timestep corresponds to t=1
+            
+            # Velocity error at t=1
+            vel_error_t1 = (pred_vel[t1_idx] - true_vel[t1_idx]) ** 2  # (N, 3)
+            vel_mse_t1 = np.mean(vel_error_t1)  # Scalar
+            rollout_errors['t1']['vel'].append(vel_mse_t1)
+            
+            # Stress error at t=1
+            stress_error_t1 = (pred_stress[t1_idx] - true_stress[t1_idx]) ** 2  # (N, 1)
+            stress_mse_t1 = np.mean(stress_error_t1)  # Scalar
+            rollout_errors['t1']['stress'].append(stress_mse_t1)
+        
+        # Compute error for t=50 (index 49 if available, otherwise use last timestep)
+        if T_pred >= 50:
+            t50_idx = 49  # t=50 corresponds to index 49 (0-indexed from t=1)
+        elif T_pred > 0:
+            t50_idx = T_pred - 1  # Use last available timestep
+        else:
+            t50_idx = None
+        
+        if t50_idx is not None:
+            # Velocity error at t=50 (or last timestep)
+            vel_error_t50 = (pred_vel[t50_idx] - true_vel[t50_idx]) ** 2  # (N, 3)
+            vel_mse_t50 = np.mean(vel_error_t50)  # Scalar
+            rollout_errors['t50']['vel'].append(vel_mse_t50)
+            
+            # Stress error at t=50 (or last timestep)
+            stress_error_t50 = (pred_stress[t50_idx] - true_stress[t50_idx]) ** 2  # (N, 1)
+            stress_mse_t50 = np.mean(stress_error_t50)  # Scalar
+            rollout_errors['t50']['stress'].append(stress_mse_t50)
+    
+    # Compute and print average rollout errors
+    print(f"\n  === ROLLOUT ERRORS (Evaluation, Denormalized) ===")
+    
+    if len(rollout_errors['t1']['vel']) > 0:
+        avg_vel_t1 = np.mean(rollout_errors['t1']['vel'])
+        avg_stress_t1 = np.mean(rollout_errors['t1']['stress'])
+        print(f"  t=1 (first timestep):")
+        print(f"    Velocity MSE: {avg_vel_t1:.6f} m²/s²")
+        print(f"    Stress MSE: {avg_stress_t1:.6f} Pa²")
+    else:
+        print(f"  t=1: No valid timesteps")
+    
+    if len(rollout_errors['t50']['vel']) > 0:
+        avg_vel_t50 = np.mean(rollout_errors['t50']['vel'])
+        avg_stress_t50 = np.mean(rollout_errors['t50']['stress'])
+        # Check if all trajectories have at least 50 timesteps
+        all_have_50 = all(len(pred) >= 50 for pred in all_pred_vel)
+        actual_t = 50 if all_have_50 else f"last (T={max(len(pred) for pred in all_pred_vel)})"
+        print(f"  t={actual_t}:")
+        print(f"    Velocity MSE: {avg_vel_t50:.6f} m²/s²")
+        print(f"    Stress MSE: {avg_stress_t50:.6f} Pa²")
+    else:
+        print(f"  t=50: No valid timesteps")
+    
+    print(f"  ================================================\n")
+    
     # Save as numpy arrays
     # Note: Different trajectories may have different numbers of nodes (N),
     # so we save as a list of arrays rather than trying to stack into a single array
@@ -1191,82 +1263,6 @@ def train_epoch(model, dataloader, optimizer, device, epoch, velocity_loss_weigh
                     print(f"     mean={pred_stress_flat.mean().item():.6f}")
                     print(f"     This means the stress head is outputting the same value for all nodes!")
                     print(f"     Possible causes: vanishing gradients, dead ReLU, or initialization issue.")
-            
-            # CRITICAL DEBUG: Check stress predictions vs targets in normalized space
-            # Also check boundary nodes specifically
-            if batch_idx == 0 and valid_timesteps == 1:
-                pred_stress_norm_masked = pred_stress_norm.squeeze(-1)[stress_mask > 0]  # (num_masked,)
-                target_stress_norm_masked = target_stress_t_norm[stress_mask > 0]  # (num_masked,)
-                
-                # Identify boundary nodes by checking node positions (NORMAL nodes at edges)
-                # This is approximate - we check if nodes are near min/max positions
-                coors_t_minus_1_flat = coors_t_minus_1[0]  # (N, 3) - remove batch dim
-                x_min, x_max = coors_t_minus_1_flat[:, 0].min(), coors_t_minus_1_flat[:, 0].max()
-                y_min, y_max = coors_t_minus_1_flat[:, 1].min(), coors_t_minus_1_flat[:, 1].max()
-                z_min, z_max = coors_t_minus_1_flat[:, 2].min(), coors_t_minus_1_flat[:, 2].max()
-                x_range, y_range, z_range = x_max - x_min, y_max - y_min, z_max - z_min
-                tol = 0.02  # 2% tolerance for boundary detection
-                
-                boundary_x = ((coors_t_minus_1_flat[:, 0] - x_min) < tol * x_range) | ((x_max - coors_t_minus_1_flat[:, 0]) < tol * x_range)
-                boundary_y = ((coors_t_minus_1_flat[:, 1] - y_min) < tol * y_range) | ((y_max - coors_t_minus_1_flat[:, 1]) < tol * y_range)
-                boundary_z = ((coors_t_minus_1_flat[:, 2] - z_min) < tol * z_range) | ((z_max - coors_t_minus_1_flat[:, 2]) < tol * z_range)
-                boundary_mask = (boundary_x | boundary_y | boundary_z).float()  # (N,)
-                boundary_normal_mask = boundary_mask * stress_mask[0]  # (N,) - boundary NORMAL nodes
-                
-                if boundary_normal_mask.sum() > 0:
-                    boundary_pred = pred_stress_norm.squeeze(-1)[0][boundary_normal_mask > 0.5]  # (num_boundary,)
-                    boundary_target = target_stress_t_norm[0][boundary_normal_mask > 0.5]  # (num_boundary,)
-                    boundary_zero_pred = (boundary_pred.abs() < 0.01).sum().item()
-                    boundary_total = len(boundary_pred)
-                    
-                    print(f"  Boundary NORMAL nodes: {boundary_total}, zero predictions: {boundary_zero_pred} ({100*boundary_zero_pred/max(boundary_total,1):.1f}%)")
-                    if boundary_total > 0:
-                        print(f"    Boundary pred: min={boundary_pred.min().item():.4f}, max={boundary_pred.max().item():.4f}, mean={boundary_pred.mean().item():.4f}")
-                        print(f"    Boundary target: min={boundary_target.min().item():.4f}, max={boundary_target.max().item():.4f}, mean={boundary_target.mean().item():.4f}")
-                
-                
-                if pred_stress_norm_masked.numel() > 0:
-                    print(f"\n  === STRESS DEBUG (t={t}, Normalized Space) ===")
-                    print(f"  Normalization: mean={dataset.stress_mean:.2f}, std={dataset.stress_std:.2f}")
-                    print(f"  Predicted stress (normalized, NORMAL nodes only):")
-                    print(f"    min={pred_stress_norm_masked.min().item():.6f}, max={pred_stress_norm_masked.max().item():.6f}")
-                    print(f"    mean={pred_stress_norm_masked.mean().item():.6f}, std={pred_stress_norm_masked.std().item():.6f}")
-                    print(f"  Target stress (normalized, NORMAL nodes only):")
-                    print(f"    min={target_stress_norm_masked.min().item():.6f}, max={target_stress_norm_masked.max().item():.6f}")
-                    print(f"    mean={target_stress_norm_masked.mean().item():.6f}, std={target_stress_norm_masked.std().item():.6f}")
-                    
-                    # Check if predictions are uniform
-                    pred_std = pred_stress_norm_masked.std().item()
-                    target_std = target_stress_norm_masked.std().item()
-                    pred_mean = pred_stress_norm_masked.mean().item()
-                    target_mean = target_stress_norm_masked.mean().item()
-                    
-                    if pred_std < 0.01 * abs(pred_mean):
-                        print(f"  ⚠ CRITICAL: Predictions are UNIFORM! std={pred_std:.8f}, mean={pred_mean:.6f}")
-                        print(f"     Model is predicting the same value ({pred_mean:.6f}) for all nodes!")
-                    
-                    # Check prediction vs target statistics
-                    pred_target_diff = (pred_stress_norm_masked - target_stress_norm_masked).abs()
-                    mean_error = pred_target_diff.mean().item()
-                    max_error = pred_target_diff.max().item()
-                    print(f"  Prediction error (normalized):")
-                    print(f"    mean_abs_error={mean_error:.6f}, max_abs_error={max_error:.6f}")
-                    print(f"    RMSE={torch.sqrt((pred_stress_norm_masked - target_stress_norm_masked).pow(2).mean()).item():.6f}")
-                    print(f"    Target std={target_std:.6f}, Pred std={pred_std:.6f}")
-                    if pred_std < 0.1 * target_std:
-                        print(f"    ⚠ WARNING: Prediction std is {target_std/pred_std:.1f}x smaller than target std!")
-                        print(f"       Model is not learning the stress distribution, only predicting a constant offset.")
-                    
-                    # Check denormalized values
-                    pred_stress_denorm = pred_stress_norm_masked * dataset.stress_std + dataset.stress_mean
-                    target_stress_denorm = target_stress_norm_masked * dataset.stress_std + dataset.stress_mean
-                    print(f"  Denormalized (for reference):")
-                    print(f"    pred: mean={pred_stress_denorm.mean().item():.2f}, std={pred_stress_denorm.std().item():.2f}")
-                    print(f"    target: mean={target_stress_denorm.mean().item():.2f}, std={target_stress_denorm.std().item():.2f}")
-                    denorm_rmse = torch.sqrt((pred_stress_denorm - target_stress_denorm).pow(2).mean()).item()
-                    print(f"    Denormalized RMSE={denorm_rmse:.2f}")
-                    
-                    print(f"  ====================================\n")
             
             # Combined loss: velocity + stress
             # Don't divide by valid_timesteps here - we'll accumulate and divide at the end

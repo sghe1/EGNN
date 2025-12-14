@@ -593,13 +593,13 @@ def main():
     parser.add_argument(
         '--epoch',
         type=int,
-        default=22,
+        default=200,
         help='Epoch number to visualize (e.g., 1, 2, 5). Default: 1'
     )
     parser.add_argument(
         '--traj_idx',
         type=int,
-        default=9,
+        default=0,
         help='Trajectory index (default: 0)'
     )
     parser.add_argument(
