@@ -53,9 +53,14 @@ def preprocess(cfg):
         edge_index = build_static_edges(cells)
         
         # One-Hot Type: Sphere(1)->[1,0], Other->[0,1]
+    # CORRECT One-Hot Type: 
+        # 0 (Plate)  -> [0, 0]
+        # 1 (Sphere) -> [1, 0]
+        # 3 (Handle) -> [0, 1]
         nt = np.zeros((len(type_raw), 2), dtype=np.float32)
-        nt[type_raw == 1] = [1, 0] 
-        nt[type_raw != 1] = [0, 1] 
+        nt[type_raw == 1] = [1, 0] # Sphere
+        nt[type_raw == 3] = [0, 1] # Handle
+        # Plate (0) remains [0, 0]
 
         x_seq, y_seq = [], []
         
