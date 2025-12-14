@@ -111,18 +111,31 @@ class EGNNTFRecordDataset(Dataset):
         return data
 
     def __getitem__(self, idx: int) -> Data:
-        traj_idx, time_idx = self.index_list[idx]
-        traj = self._load_traj_to_cache(traj_idx)
-        
-        # Load Tensors
-        x = traj["x"][time_idx].float()       # [N, 9]
-        y = traj["y"][time_idx].float()       # [N, 4]
-        node_type = traj["node_type"].long()  # [N]
-        edge_index = traj["edge_index"].long() # [2, E]
-        
-        data = Data(x=x, y=y, edge_index=edge_index, node_type=node_type)
-
-        if self.transform is not None:
-            data = self.transform(data)
+            traj_idx, time_idx = self.index_list[idx]
+            traj = self._load_traj_to_cache(traj_idx)
             
-        return data
+            # 1. Load Raw Tensors
+            x = traj["x"][time_idx].float()       # [N, 9]
+            y = traj["y"][time_idx].float()       # [N, 4]
+            node_type = traj["node_type"].long()  # [N]
+            edge_index = traj["edge_index"].long()
+            
+            # 2. Apply Normalization (CRITICAL FIX)
+            # Stats are on CPU, moving to tensor device if needed
+            mean_feat = self.mean_feat.to(x.device)
+            std_feat = self.std_feat.to(x.device)
+            mean_target = self.mean_target.to(y.device)
+            std_target = self.std_target.to(y.device)
+            
+            # Normalize Input: (x - mean) / std
+            x = (x - mean_feat) / std_feat
+            
+            # Normalize Target: (y - mean) / std
+            y = (y - mean_target) / std_target
+            
+            data = Data(x=x, y=y, edge_index=edge_index, node_type=node_type)
+
+            if self.transform is not None:
+                data = self.transform(data)
+                
+            return data
