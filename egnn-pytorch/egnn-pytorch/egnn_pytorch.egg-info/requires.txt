@@ -1,0 +1,4 @@
+einops>=0.3
+numba
+numpy
+torch>=1.6

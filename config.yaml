@@ -14,9 +14,9 @@ data:
 
 training:
   lr: 0.0001
-  epochs: 500
-  batch_size: 1
-  device: "cpu"  # Use "cuda" if you have a CUDA-enabled GPU, "cpu" for macOS/CPU-only systems
+  epochs: 10
+  batch_size: 64
+  device: "cuda"  # Use "cuda" if you have a CUDA-enabled GPU, "cpu" for macOS/CPU-only systems
   seed: 42
 
   visualization:

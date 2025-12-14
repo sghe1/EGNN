@@ -1,3 +1,11 @@
+"""
+Optimized EGNN model with sparse operations for faster computation on Mac.
+
+Key optimizations:
+1. Physics update uses sparse edge operations - only computes edges that exist
+2. Uses index_add for efficient sparse aggregation instead of dense matrix operations
+3. Reduces O(N²) operations to O(E) where E is the number of edges
+"""
 import torch
 import torch.nn as nn
 from egnn_pytorch import EGNN_Network
@@ -78,19 +86,51 @@ class EGNN_DefPlate(nn.Module):
         h_emb = self.input_mlp(h_b)
         h_updated, _ = self.egnn_layers(h_emb, pos_b, adj_mat=adj_b)
         
-        # Physics Update
+        # Physics Update - OPTIMIZED: Only compute edges that exist (sparse)
         v_direct = self.phi_v(h_updated)
         
-        # Recompute edges for Eq 7
-        rel_pos = pos_b.unsqueeze(2) - pos_b.unsqueeze(1)
-        dist_sq = (rel_pos**2).sum(-1, keepdim=True)
-        h_exp = h_updated.unsqueeze(2).expand(-1, -1, h_updated.shape[1], -1)
-        edge_feat = torch.cat([h_exp, h_exp.transpose(1,2), dist_sq], dim=-1)
+        # Convert adjacency to sparse format for efficient edge computation
+        # adj_b is [1, N, N], we need edge indices
+        N = pos_b.shape[1]
+        adj_flat = adj_b.squeeze(0)  # [N, N]
         
-        weights = self.phi_x(self.phi_e_proj(edge_feat))
-        weights = weights * (adj_b.unsqueeze(-1) > 0).float()
+        # Get edge indices (only existing edges, no self-loops)
+        edge_mask = (adj_flat > 0) & (~torch.eye(N, device=adj_flat.device, dtype=torch.bool))
+        edge_indices = edge_mask.nonzero(as_tuple=False).t()  # [2, E]
         
-        neighbor_term = (rel_pos * weights).sum(2)
+        if edge_indices.shape[1] > 0:
+            # Only compute for existing edges (sparse)
+            i_idx, j_idx = edge_indices[0], edge_indices[1]
+            
+            # Compute relative positions only for existing edges
+            pos_i = pos_b.squeeze(0)[i_idx]  # [E, 3]
+            pos_j = pos_b.squeeze(0)[j_idx]  # [E, 3]
+            rel_pos_edges = pos_i - pos_j  # [E, 3]
+            dist_sq_edges = (rel_pos_edges ** 2).sum(-1, keepdim=True)  # [E, 1]
+            
+            # Get node features for edges
+            h_i = h_updated.squeeze(0)[i_idx]  # [E, hidden_dim]
+            h_j = h_updated.squeeze(0)[j_idx]  # [E, hidden_dim]
+            
+            # Compute edge features only for existing edges
+            edge_feat = torch.cat([h_i, h_j, dist_sq_edges], dim=-1)  # [E, 2*hidden_dim + 1]
+            
+            # Compute weights for edges
+            weights_edges = self.phi_x(self.phi_e_proj(edge_feat)).squeeze(-1)  # [E]
+            
+            # Aggregate neighbor contributions using sparse operations
+            # Original: neighbor_term[i] = sum_j (pos_i - pos_j) * weight[i,j] for all neighbors j
+            # We compute this efficiently by only iterating over existing edges
+            neighbor_term = torch.zeros_like(v_direct.squeeze(0))  # [N, 3]
+            
+            # Use index_add for efficient sparse aggregation
+            # For each edge (i->j), add contribution to node i: (pos_i - pos_j) * weight[i,j]
+            # Note: We only add to source node i, not to target j (to match original dense computation)
+            neighbor_term.index_add_(0, i_idx, rel_pos_edges * weights_edges.unsqueeze(-1))
+        else:
+            neighbor_term = torch.zeros_like(v_direct.squeeze(0))
+        
+        neighbor_term = neighbor_term.unsqueeze(0)  # [1, N, 3]
         pred_vel = v_direct + self.C * neighbor_term
         pred_stress = self.stress_head(h_updated)
         

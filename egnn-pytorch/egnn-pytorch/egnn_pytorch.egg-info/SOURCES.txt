@@ -1,0 +1,14 @@
+LICENSE
+README.md
+setup.cfg
+setup.py
+egnn_pytorch/__init__.py
+egnn_pytorch/egnn_pytorch.py
+egnn_pytorch/egnn_pytorch_geometric.py
+egnn_pytorch/utils.py
+egnn_pytorch.egg-info/PKG-INFO
+egnn_pytorch.egg-info/SOURCES.txt
+egnn_pytorch.egg-info/dependency_links.txt
+egnn_pytorch.egg-info/requires.txt
+egnn_pytorch.egg-info/top_level.txt
+tests/test_equivariance.py

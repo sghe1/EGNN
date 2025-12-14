@@ -1,0 +1,30 @@
+Metadata-Version: 2.4
+Name: egnn-pytorch
+Version: 0.2.8
+Summary: E(n)-Equivariant Graph Neural Network - Pytorch
+Home-page: https://github.com/lucidrains/egnn-pytorch
+Author: Phil Wang, Eric Alcaide
+Author-email: lucidrains@gmail.com
+License: MIT
+Keywords: artificial intelligence,deep learning,equivariance,graph neural network
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.6
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: einops>=0.3
+Requires-Dist: numba
+Requires-Dist: numpy
+Requires-Dist: torch>=1.6
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary

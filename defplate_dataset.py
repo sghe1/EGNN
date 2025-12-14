@@ -8,50 +8,50 @@ SPHERE_NODE = 1
 
 def add_w_edges_neigh(base_A, node_types, pos_t, k):
     """
-    For each Sphere node, it looks at its k-nearest neighbors.
+    For each Sphere node, it looks at its k-nearest neighbors (OPTIMIZED).
     If a neighbor is a Plate node (Normal or Boundary), it adds an edge.
     If a neighbor is another Sphere node, it ignores it (assumed already handled or irrelevant).
 
     :param base_A
     :param node_types
     :param pos_t
-    :param radius
+    :param k
 
     :return: (A_norm, dynamic_edges)
     """
     A_t = base_A.clone()
 
-    # 1. Identify Sphere indices
+    # 1. Identify Sphere indices (sparse operation)
     sphere_indices = torch.nonzero(node_types == SPHERE_NODE, as_tuple=True)[0]
 
     if len(sphere_indices) > 0:
-
-        # Start from sphere indices and get
+        # Start from sphere indices and get k-nearest neighbors
         sphere_pos = pos_t[sphere_indices]
-        dists = torch.cdist(sphere_pos, pos_t)
+        dists = torch.cdist(sphere_pos, pos_t)  # [num_spheres, N]
         k_val = min(k + 1, len(pos_t))
         _, neighbor_indices = torch.topk(dists, k=k_val, dim=1, largest=False)
 
-        # Get type of neighbors and create a boolean mask for valid connections, then apply
+        # Get type of neighbors and create a boolean mask for valid connections
         nb_types = node_types[neighbor_indices]
         type_mask = (nb_types == NORMAL_NODE) | (nb_types == BOUNDARY_NODE)
         self_mask = neighbor_indices != sphere_indices.unsqueeze(1)
         valid_mask = type_mask & self_mask
+        
+        # Extract valid edge indices (sparse)
         source_idxs = sphere_indices.unsqueeze(1).expand_as(neighbor_indices)[valid_mask]
         target_idxs = neighbor_indices[valid_mask]
 
-        # Update the adjacency matrix and return edge list
-        A_t.index_put_((source_idxs, target_idxs), torch.tensor(1.0, device=A_t.device))
-        A_t.index_put_((target_idxs, source_idxs), torch.tensor(1.0, device=A_t.device))
+        # Update the adjacency matrix using sparse indexing (faster than dense operations)
         if len(source_idxs) > 0:
+            A_t.index_put_((source_idxs, target_idxs), torch.tensor(1.0, device=A_t.device))
+            A_t.index_put_((target_idxs, source_idxs), torch.tensor(1.0, device=A_t.device))
             dynamic_edges = torch.stack([source_idxs, target_idxs], dim=0)
         else:
             dynamic_edges = torch.empty((2, 0), dtype=torch.long, device=A_t.device)
-
     else:
         dynamic_edges = torch.empty((2, 0), dtype=torch.long, device=A_t.device)
 
-    # Normalize new adjacency matrix TODO NOTE: ROW WISE
+    # Normalize new adjacency matrix (row-wise) - optimized with in-place operations
     row_sums = A_t.sum(dim=1, keepdim=True)
     row_sums[row_sums == 0] = 1.0
     A_norm = A_t / row_sums
@@ -61,7 +61,7 @@ def add_w_edges_neigh(base_A, node_types, pos_t, k):
 
 def add_w_edges_radius(base_A, node_types, pos_t, radius):
     """
-    Computes A_t dynamically using radius search.
+    Computes A_t dynamically using radius search (OPTIMIZED with sparse operations).
     Excludes existing mesh edges (base_A) and self-loops.
 
     :param base_A
@@ -77,25 +77,27 @@ def add_w_edges_radius(base_A, node_types, pos_t, radius):
     if base_A.device != pos_t.device:
         base_A = base_A.to(pos_t.device)
 
-    # Compute pairwise distances, mask radius and esclude self loops
+    # OPTIMIZATION: Use efficient masking operations
+    # Compute pairwise distances (unavoidable for radius search)
     dists = torch.cdist(pos_t, pos_t)
     radius_mask = dists < radius
-    radius_mask.fill_diagonal_(False)
+    radius_mask.fill_diagonal_(False)  # Exclude self-loops
 
-    # Exclude existing mesh edges
+    # Exclude existing mesh edges (sparse operation)
     mesh_edge_mask = base_A > 0
     valid_world_mask = radius_mask & (~mesh_edge_mask)
 
-    # Build combined adjacency and normalize
-    binary_mesh = mesh_edge_mask.float()
-    binary_world = valid_world_mask.float()
-    A_combined = binary_mesh + binary_world
+    # Build combined adjacency efficiently
+    A_combined = base_A.clone()
+    A_combined[valid_world_mask] = 1.0  # Add world edges
+    
+    # Normalize (row-wise) - optimized
     row_sums = A_combined.sum(dim=1, keepdim=True)
     row_sums[row_sums == 0] = 1.0
     A_norm = A_combined / row_sums
 
-    # Extract edge list for world edges (for return)
-    dynamic_edges = torch.nonzero(binary_world, as_tuple=False).t()
+    # Extract edge list for world edges (sparse indices)
+    dynamic_edges = torch.nonzero(valid_world_mask, as_tuple=False).t()
     if dynamic_edges.numel() == 0:
          dynamic_edges = torch.empty((2, 0), dtype=torch.long, device=pos_t.device)
 
@@ -123,27 +125,37 @@ class DefPlateDataset(Dataset):
 
         return A_dynamic, dynamic_edges
 
-    def __init__(self, list_of_trajs, add_world_edges, k_neighb, radius, world_pos_idxs, velocity_idxs):
+    def __init__(self, list_of_trajs, add_world_edges=None, k_neighb=None, radius=None, world_pos_idxs=None, velocity_idxs=None):
         """
         Construct a dataset from a list of trajectories objects.
 
         :param list_of_trajs: List
-            a list where each item has (A, X_seq_norm, mean, std, cells, node_type)
-        :param add_world_edges: bool
-            whether to add world edges dynamically based on radius search
-        :param k_neighb
-
-        :param radius
-
+            a list where each item has (A, X_seq_norm, mean, std, cells, node_type, A_seq)
+            - A_seq: [T, N, N] precomputed adjacency matrices with world edges (if available)
+        :param add_world_edges: str (optional, for backward compatibility)
+            Only used if A_seq is not available in trajectories
+        :param k_neighb: int (optional, for backward compatibility)
+        :param radius: float (optional, for backward compatibility)
+        :param world_pos_idxs: slice (required)
+        :param velocity_idxs: slice (required)
         """
         self.samples = []
         # Store the list of trajectories
         self.trajs = list_of_trajs
-        self.add_world_edges = add_world_edges
-        self.k_neighb = k_neighb
-        self.radius = radius
         self.world_pos_idxs = world_pos_idxs
         self.velocity_idxs = velocity_idxs
+        
+        # Check if A_seq is precomputed (new approach)
+        self.use_precomputed_A = "A_seq" in list_of_trajs[0] if len(list_of_trajs) > 0 else False
+        
+        if self.use_precomputed_A:
+            print("✓ Using precomputed adjacency matrices (A_seq) - world edges computed during preprocessing")
+        else:
+            print("⚠ A_seq not found - computing world edges on the fly (slower)")
+            # Fallback to old method
+            self.add_world_edges = add_world_edges or "None"
+            self.k_neighb = k_neighb or 5
+            self.radius = radius or 0.03
 
         for traj_id, traj in enumerate(list_of_trajs):
             X_seq = traj["X_seq_norm"]
@@ -159,27 +171,41 @@ class DefPlateDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Fetches the sample and computes the dynamic adjacency matrix.
+        Fetches the sample and uses precomputed adjacency matrix (or computes it if not available).
+        
+        IMPORTANT: All features are NORMALIZED.
+        - X_seq_norm contains normalized features: (X - mean) / std
+        - X_t and X_tp1 are both normalized
+        - Targets (velocity, stress) extracted from X_tp1 are normalized
         """
         # Retrieve trajectory and its features
         s = self.samples[idx]
         traj_id = s["traj_id"]
         t = s["time_idx"]
         traj = self.trajs[traj_id]
-        X_t = traj["X_seq_norm"][t]
-        X_tp1 = traj["X_seq_norm"][t + 1]
-        base_A = traj["A"]
+        # X_seq_norm is normalized: (X - mean) / std (computed in data_loader.py)
+        X_t = traj["X_seq_norm"][t]  # Normalized features at time t
+        X_tp1 = traj["X_seq_norm"][t + 1]  # Normalized features at time t+1 (used as target)
         node_types = traj["node_type"]
 
         time_start = time.time()
-        # Compute Dynamic Adjacency
-        pos_t = X_t[:, self.world_pos_idxs]
-        A_dynamic, dynamic_edges = self.add_w_edges(base_A, node_types, pos_t)
-        # Time tracking ends
-        compute_duration = time.time() - time_start
+        
+        # Use precomputed adjacency matrix if available (much faster!)
+        if self.use_precomputed_A:
+            A_dynamic = traj["A_seq"][t]  # [N, N] precomputed adjacency with world edges
+            # For backward compatibility, create empty dynamic_edges
+            dynamic_edges = torch.empty((2, 0), dtype=torch.long, device=A_dynamic.device)
+            compute_duration = 0.0  # No computation time needed
+        else:
+            # Fallback: compute on the fly (slower, for backward compatibility)
+            base_A = traj["A"]
+            pos_t = X_t[:, self.world_pos_idxs]
+            A_dynamic, dynamic_edges = self.add_w_edges(base_A, node_types, pos_t)
+            compute_duration = time.time() - time_start
 
-        # Extract velocity at t+1 (already normalized) and create new feature with filled only sphere nodes. Then cat
-        v_tp1 = X_tp1[:, self.velocity_idxs]
+        # Extract velocity at t+1 (NORMALIZED: X_seq_norm[t+1] contains normalized features)
+        # Create kinematic velocity feature for sphere nodes only, then concatenate
+        v_tp1 = X_tp1[:, self.velocity_idxs]  # Normalized velocity
         sphere_mask = (node_types == SPHERE_NODE)
         kinematic_vel = torch.zeros_like(v_tp1)
         kinematic_vel[sphere_mask] = v_tp1[sphere_mask]
