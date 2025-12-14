@@ -18,6 +18,11 @@ training:
   batch_size: 1
   device: "cpu"  # Use "cuda" if you have a CUDA-enabled GPU, "cpu" for macOS/CPU-only systems
   seed: 42
+
+  visualization:
+  start_step: 0       # Where to start the rollout
+  rollout_steps: 50   # How many steps to simulate
+  render_step: 40     # Which step to actually plot (must be < rollout_steps)
   
   # --- RESTORED OVERFIT CONFIG ---
   mode: "overfit"          # "standard" or "overfit"
