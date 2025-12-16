@@ -1,4 +1,5 @@
-tensorflow>=2.0
+tensorflow>=2.8.0,<2.16.0
+tensorflow-probability>=0.16.0,<0.23.0
 dm-sonnet<2
 matplotlib
 absl-py

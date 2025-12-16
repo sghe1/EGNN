@@ -24,7 +24,7 @@ class Normalizer(snt.Module):
 
   def __init__(self, size, max_accumulations=10**6, std_epsilon=1e-8,
                name='Normalizer'):
-    super(Normalizer, self).__init__(name=name)
+    # Patched: Don't call super().__init__() - Sonnet Module requires build method
     self._max_accumulations = max_accumulations
     self._std_epsilon = std_epsilon
     self._acc_count = tf.Variable(0, dtype=tf.float32, trainable=False)

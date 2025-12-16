@@ -343,6 +343,93 @@ def build_edges_from_cells(cells, num_nodes=None):
     return torch.tensor(edge_list, dtype=torch.long)
 
 
+def add_proximity_edges(base_edge_index, world_pos, proximity_radius=0.1, max_edges_per_node=None):
+    """
+    Add world-space proximity edges based on Euclidean distance.
+    
+    As per report: "graph is augmented with world-space proximity edges: nodes that are 
+    close in Euclidean space are connected dynamically, allowing information to propagate 
+    across near-contact regions even when they do not share mesh elements."
+    
+    Args:
+        base_edge_index: (E, 2) tensor of existing mesh edges
+        world_pos: (N, 3) tensor of world-space positions at time t
+        proximity_radius: float, maximum distance for proximity edges
+        max_edges_per_node: optional int, maximum proximity edges per node (for memory)
+    
+    Returns:
+        edge_index: (E_new, 2) tensor with mesh edges + proximity edges (bidirectional)
+    """
+    import torch
+    
+    # Convert to torch if needed
+    if isinstance(world_pos, np.ndarray):
+        world_pos = torch.tensor(world_pos, dtype=torch.float32)
+    if isinstance(base_edge_index, np.ndarray):
+        base_edge_index = torch.tensor(base_edge_index, dtype=torch.long)
+    
+    N = world_pos.shape[0]
+    
+    # Start with existing mesh edges
+    edge_set = set()
+    if base_edge_index.shape[0] > 0:
+        if base_edge_index.shape[0] == 2 and base_edge_index.shape[1] > 0:
+            # (2, E) format
+            for i in range(base_edge_index.shape[1]):
+                u, v = int(base_edge_index[0, i]), int(base_edge_index[1, i])
+                if u != v:
+                    edge_set.add((u, v))
+                    edge_set.add((v, u))
+        else:
+            # (E, 2) format
+            for i in range(base_edge_index.shape[0]):
+                u, v = int(base_edge_index[i, 0]), int(base_edge_index[i, 1])
+                if u != v:
+                    edge_set.add((u, v))
+                    edge_set.add((v, u))
+    
+    # Compute pairwise distances
+    # world_pos: (N, 3)
+    dists = torch.cdist(world_pos, world_pos)  # (N, N)
+    
+    # Find nodes within proximity_radius (excluding self-loops and existing edges)
+    proximity_mask = (dists < proximity_radius) & (dists > 1e-8)  # Exclude self-loops
+    
+    # Remove existing mesh edges from proximity candidates
+    existing_edges_set = edge_set.copy()
+    for u in range(N):
+        for v in range(N):
+            if (u, v) in existing_edges_set:
+                proximity_mask[u, v] = False
+    
+    # Add proximity edges (with optional per-node capping)
+    if max_edges_per_node is not None:
+        # For each node, add up to max_edges_per_node closest neighbors
+        for u in range(N):
+            neighbors = torch.nonzero(proximity_mask[u], as_tuple=False).squeeze(-1)
+            if len(neighbors) > 0:
+                neighbor_dists = dists[u, neighbors]
+                _, sorted_idx = torch.sort(neighbor_dists)
+                neighbors = neighbors[sorted_idx[:max_edges_per_node]]
+                
+                for v in neighbors:
+                    v = int(v)
+                    if (u, v) not in edge_set:
+                        edge_set.add((u, v))
+                        edge_set.add((v, u))  # bidirectional
+    else:
+        # Add all proximity edges
+        proximity_edges = torch.nonzero(proximity_mask, as_tuple=False)  # (E_prox, 2)
+        for i in range(proximity_edges.shape[0]):
+            u, v = int(proximity_edges[i, 0]), int(proximity_edges[i, 1])
+            if (u, v) not in edge_set:
+                edge_set.add((u, v))
+                edge_set.add((v, u))  # bidirectional
+    
+    edge_list = sorted(edge_set)
+    return torch.tensor(edge_list, dtype=torch.long)
+
+
 # ============================================================
 # 3) ASSEMBLAGGIO INPUT EGNN
 # ============================================================

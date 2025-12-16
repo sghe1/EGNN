@@ -29,7 +29,8 @@ class GraphNetBlock(snt.Module):
   """Multi-Edge Interaction Network with residual connections."""
 
   def __init__(self, model_fn, name='GraphNetBlock'):
-    super(GraphNetBlock, self).__init__(name=name)
+    # Patched: Don't call super().__init__() - Sonnet Module requires build method
+    # We define _build method instead
     self._model_fn = model_fn
     # Cache MLPs for edges and nodes separately since they have different input sizes
     self._edge_mlp_cache = {}
@@ -107,7 +108,8 @@ class EncodeProcessDecode(snt.Module):
                num_layers,
                message_passing_steps,
                name='EncodeProcessDecode'):
-    super(EncodeProcessDecode, self).__init__(name=name)
+    # Patched: Don't call super().__init__() - Sonnet Module requires build method
+    # We define _build method instead
     self._latent_size = latent_size
     self._output_size = output_size
     self._num_layers = num_layers
@@ -130,8 +132,8 @@ class EncodeProcessDecode(snt.Module):
         widths = [self._latent_size] * self._num_layers + [output_size]
       network = snt.nets.MLP(widths, activate_final=False)
       if layer_norm:
-        # dm-sonnet 2.0 LayerNorm requires axis, create_scale, create_offset
-        network = snt.Sequential([network, snt.LayerNorm(axis=-1, create_scale=True, create_offset=True)])
+        # dm-sonnet 1.36 LayerNorm uses scale and offset (not create_scale/create_offset)
+        network = snt.Sequential([network, snt.LayerNorm(axis=-1, scale=True, offset=True)])
       self._mlp_cache[cache_key] = network
     return self._mlp_cache[cache_key]
 

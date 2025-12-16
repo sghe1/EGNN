@@ -1,18 +1,11 @@
 """
-E(n) Equivariant Graph Neural Networks (EGNN) implementation
-Following "E(n) Equivariant Graph Neural Networks" (arXiv:2102.09844v3)
+EGNN model definition for mesh deformation prediction.
 
-Equations implemented:
-- Eq 3: m_ij = φ_e(h_i^l, h_j^l, ||x_i^l - x_j^l||^2, a_ij)
-- Eq 5: m_i = Σ_(j≠i) m_ij
-- Eq 6: h_i^(l+1) = φ_h(h_i^l, m_i)
-- Eq 7: v_i^(l+1) = φ_v(h_i^l) * v_init_i + C * Σ_(j≠i) (x_i^l - x_j^l) * φ_x(m_ij)
-- Then: x_i^(l+1) = x_i^l + v_i^(l+1)
+This module contains the MeshEGNN model class and related components.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from egnn_pytorch import EGNN_Network
 
 

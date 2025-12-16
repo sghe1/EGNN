@@ -27,7 +27,8 @@ class Model(snt.Module):
   """Model for deforming plate simulation."""
 
   def __init__(self, learned_model, name='Model'):
-    super(Model, self).__init__(name=name)
+    # Patched: Don't call super().__init__() - Sonnet Module requires build method
+    # We define _build method instead
     self._learned_model = learned_model
     self._output_normalizer = normalization.Normalizer(
         size=3, name='output_normalizer')

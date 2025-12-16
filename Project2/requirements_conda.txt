@@ -1,0 +1,27 @@
+# MeshGraphNet Conda Environment Requirements
+# Compatible with Python 3.10 or 3.11
+
+# Core TensorFlow (must be < 2.16.0 for MeshGraphNet compatibility)
+tensorflow>=2.13.0,<2.16.0
+# Alternative for Apple Silicon:
+# tensorflow-macos==2.13.1
+# tensorflow-metal==1.1.0
+
+# TensorFlow Probability (compatible with TensorFlow 2.13-2.15)
+tensorflow-probability>=0.18.0,<0.20.0
+
+# DeepMind Sonnet (may require older tensorflow-probability)
+# If dm-sonnet fails, try: pip install tensorflow-probability>=0.8.0,<0.9.0 first
+dm-sonnet<2
+
+# Core dependencies
+numpy>=1.22,<1.25
+protobuf>=3.20.3,<4.0.0
+matplotlib
+absl-py
+h5py>=3.1.0,<4.0.0
+six>=1.15.0
+
+# Optional but recommended
+tensorboard>=2.13,<2.14
+
