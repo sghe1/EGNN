@@ -162,7 +162,6 @@ class EGNN_DefPlate(nn.Module):
         This EGNN fork expects adj_mat as a boolean mask and derives neighborhoods internally.
         """
         # Lazy initialization of C: set to 1/(N-1) on first forward if not already initialized
-        # (e.g., from checkpoint loading). If C was loaded from checkpoint (C != -1.0), skip init.
         N = x.shape[0]
         if not self._c_initialized.item():
             # Check if C was loaded from checkpoint (not sentinel value)
@@ -213,7 +212,8 @@ class EGNN_DefPlate(nn.Module):
             weights_edges = self.phi_x(self.phi_e_proj(edge_feat)).squeeze(-1)  # [E]
 
             neighbor_term = torch.zeros_like(v_direct.squeeze(0))          # [N, 3]
-            neighbor_term.index_add_(0, i_idx, rel_pos_edges * weights_edges.unsqueeze(-1))
+            src = rel_pos_edges * weights_edges.unsqueeze(-1)
+            neighbor_term.index_add_(0, i_idx, src.to(dtype=neighbor_term.dtype))
         else:
             neighbor_term = torch.zeros_like(v_direct.squeeze(0))
 

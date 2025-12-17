@@ -93,7 +93,18 @@ def run_final_evaluation(model, test_loader, device, history, velocity_idxs, str
     print("[train] Generating final evaluation plots...")
 
     activations = {}
-    handle = model.velocity_mlp.register_forward_hook(
+    # Support both legacy GUNet (velocity_mlp) and current EGNN (phi_v) architectures
+    if hasattr(model, 'phi_v'):
+        # EGNN architecture (current)
+        velocity_module = model.phi_v
+    elif hasattr(model, 'velocity_mlp'):
+        # Legacy GUNet architecture (backward compatibility)
+        velocity_module = model.velocity_mlp
+    else:
+        raise AttributeError(f"Model {type(model).__name__} has neither 'velocity_mlp' nor 'phi_v' attribute. "
+                            f"Available attributes: {[attr for attr in dir(model) if not attr.startswith('_')]}")
+    
+    handle = velocity_module.register_forward_hook(
         lambda m, i, o: activations.update({'latent_features': i[0].detach().cpu().numpy()})
     )
 

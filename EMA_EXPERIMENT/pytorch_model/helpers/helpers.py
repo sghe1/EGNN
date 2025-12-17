@@ -8,12 +8,12 @@ import numpy as np
 @dataclass
 class FeatureIndices:
     """Container for feature slice indices."""
-    world_pos: slice
-    velocity: slice
-    stress: slice
+    world_pos: Optional[slice]
+    velocity: Optional[slice]
+    stress: Optional[slice]
     dim_in: int
-    mesh_pos: slice | None
-    nodetype: slice
+    mesh_pos: Optional[slice]
+    nodetype: Optional[slice]
 
 def load_config(config_path):
     """Load model and training configuration from YAML file."""

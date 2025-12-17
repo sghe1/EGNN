@@ -5,7 +5,6 @@ import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from data_helper.add_world_edges import add_w_edges_radius
-#from model.gunet_deforming_plate import EGNN_DefPlate
 from model_egnn.egnn_deforming_plate import EGNN_DefPlate
 from data_builder import build_adjacency_matrix
 from helpers.helpers import get_feature_indices, load_config
@@ -127,7 +126,7 @@ def visualize_mesh_pair(pos_true, pos_pred, cells, stress_true, stress_pred, nod
         raise ValueError("node_type_pred should not have a batch dimension")
 
     # ======================================================
-    # 2) TRIANGOLAZIONE CELLE QUADRILATERE
+    # 2) TRIANGULATE CELLS
     # ======================================================
     tri_i, tri_j, tri_k = [], [], []
     for (i0, i1, i2, i3) in cells:
@@ -152,7 +151,7 @@ def visualize_mesh_pair(pos_true, pos_pred, cells, stress_true, stress_pred, nod
         tri_k.extend([i2])
 
     # ======================================================
-    # 3) COLORI / HEATMAP
+    # 3) COLORS / HEATMAP
     # ======================================================
 
     # --- STRESS MODE ---
@@ -353,17 +352,13 @@ def rollout(model, A, X_seq_norm, mean_vec, std_vec, t0, steps, node_type, vel_i
     base_A = A.clone() 
     dynamic_edges_list = []  # Store edges for viz
     for k in range(steps):
-        # Generate world edges for the current predicted state
-        # using the mesh-space positions if relevant, or current physical positions?
-        # The paper says world edges are based on spatial proximity in world space.
-        # radius=0.03 from paper for deforming plate
+        # Generate world edges for the current predicted state with radius=0.03 from paper for deforming plate
         if add_world_edges:
             A_dynamic, dyn_edges = add_w_edges_radius(base_A, node_type, p_hat, radius=radius)
         else:
             A_dynamic = base_A
             dyn_edges = None
 
-        # print(f"dyn_edges={dyn_edges.shape}")
         dynamic_edges_list.append(dyn_edges)
         # ======================================================
         # 1) Predict NORMALIZED velocity + stress
@@ -519,15 +514,46 @@ def main(mesh_pos_idxs, world_pos_idxs, node_type_idxs, vel_idxs, stress_idxs, d
 
     # dim_in = X_seq_norm.shape[2]
     # Model trained to output [vx,vy,vz,stress]
-    model = EGNN_DefPlate(dim_in, 3, 1, myargs, adj_norm=model_cfg['adj_norm']).to(device)
     state = torch.load(checkpoint_path, map_location=device)
-
-    # Backwards compatibility: old checkpoints used "s_gcn" instead of "start_gcn"
-    if "s_gcn.proj.weight" in state:
-        state["start_gcn.proj.weight"] = state.pop("s_gcn.proj.weight")
-    if "s_gcn.proj.bias" in state:
-        state["start_gcn.proj.bias"] = state.pop("s_gcn.proj.bias")
-    model.load_state_dict(state)
+    
+    # Detect architecture from checkpoint keys
+    state_keys = list(state.keys())
+    # Check for legacy GUNet architecture markers 
+    is_gunet = any(any(marker in k for k in state_keys) for marker in ["start_gcn", "g_unet", "velocity_mlp", "stress_mlp"])
+    # Check for EGNN architecture markers 
+    is_egnn = any(any(marker in k for k in state_keys) for marker in ["input_mlp", "egnn_layers", "phi_v", "stress_head"])
+    
+    if is_gunet and not is_egnn:
+        gunet_keys_sample = [k for k in state_keys if any(marker in k for marker in ['g_unet', 'start_gcn', 'velocity_mlp', 'stress_mlp'])][:5]
+        train_script_path = os.path.join(os.path.dirname(__file__), "train.py")
+        raise ValueError(
+            f"\n{'='*80}\n"
+            f"ARCHITECTURE MISMATCH: GUNet checkpoint detected, but script requires EGNN\n"
+            f"{'='*80}\n"
+            f"Checkpoint: {checkpoint_path}\n"
+            f"Checkpoint architecture: GUNet (old checkpoint)\n"
+            f"Script expects: EGNN_DefPlate\n\n"
+            f"SOLUTION: Train a new EGNN model\n"
+            f"  Run: python {train_script_path}\n"
+            f"  This will create a new EGNN checkpoint at: {checkpoint_path}\n"
+            f"  Then re-run this visualization script.\n"
+            f"{'='*80}\n"
+        )
+    
+    if not is_egnn:
+        raise ValueError(
+            f"Could not detect EGNN model architecture from checkpoint at {checkpoint_path}. "
+            f"Expected EGNN architecture (keys like 'input_mlp', 'egnn_layers', 'phi_v', 'stress_head'). "
+            f"Found keys: {list(state_keys)[:10]}..."
+        )
+    
+    model = EGNN_DefPlate(dim_in, 3, 1, myargs, adj_norm=model_cfg['adj_norm']).to(device)
+    # Load with strict=False to handle minor key mismatches, but warn if there are issues
+    missing_keys, unexpected_keys = model.load_state_dict(state, strict=False)
+    if missing_keys:
+        print(f"Warning: Missing keys in checkpoint: {missing_keys[:5]}... (total: {len(missing_keys)})")
+    if unexpected_keys:
+        print(f"Warning: Unexpected keys in checkpoint (will be ignored): {unexpected_keys[:5]}... (total: {len(unexpected_keys)})")
     model.eval()
 
     # ---------------------- ONE-STEP PREDICTION ----------------------
@@ -576,10 +602,7 @@ def main(mesh_pos_idxs, world_pos_idxs, node_type_idxs, vel_idxs, stress_idxs, d
     )
 
     if not rollout_set:
-        # Compute edges for the single step state (using pos_pred as the "current" state logic, or pos_true?)
-        # Usually we visualize the prediction state's dynamic edges.
-        # But if we want to see what edges WOULD be there, we can compute them on pos_pred.
-
+        
         # We need tensors for add_edges
         base_A_tensor = A
         node_type_tensor = node_type
@@ -697,20 +720,37 @@ if __name__ == "__main__":
     render_mode = "all"  # options: "all", "no_border", "no_sphere", "no_border_no_sphere"
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     config = load_config(config_path)
-    preprocessed_path = config['training']['datapath'] + "/preprocessed_train.pt"
+    
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    datapath = os.path.join(base_dir, config['training']['datapath'])
+    preprocessed_path = os.path.join(datapath, "preprocessed_train.pt")
     
     # Load used_dataconfig.yaml to get data processing parameters
-    used_dataconfig_path = os.path.join(config['training']['datapath'], "used_dataconfig.yaml")
+    used_dataconfig_path = os.path.join(datapath, "used_dataconfig.yaml")
     if os.path.exists(used_dataconfig_path):
         dataconfig = load_config(used_dataconfig_path)
+        include_mesh_pos = dataconfig['include_mesh_pos']
+        add_world_edges = dataconfig['add_world_edges']
     else:
-        raise ValueError(f"Warning: {used_dataconfig_path} not found. Using defaults.")
-    include_mesh_pos = dataconfig['include_mesh_pos']
-    add_world_edges = dataconfig['add_world_edges']
+        print(f"Warning: {used_dataconfig_path} not found. Using defaults.")
+        # Default values based on dataconfig.yaml
+        include_mesh_pos = True
+        add_world_edges = "radius"
 
-    dataset_name = os.path.basename(os.path.normpath(config['training']["datapath"]))
-    out_dir = os.path.join(config['training']["model_path_out"], dataset_name)
-    checkpoint_path = os.path.join(out_dir, "model.pt")
+    dataset_name = os.path.basename(os.path.normpath(datapath))
+    # Note: setup_paths in train.py saves relative to current directory, not base_dir
+    
+    script_dir = os.path.dirname(__file__)
+    checkpoint_path_script_dir = os.path.join(script_dir, config['training']["model_path_out"], dataset_name, "model.pt")
+    checkpoint_path_base_dir = os.path.join(base_dir, config['training']["model_path_out"], dataset_name, "model.pt")
+    
+    # Prefer the checkpoint in script directory (where train.py saves it)
+    if os.path.exists(checkpoint_path_script_dir):
+        checkpoint_path = checkpoint_path_script_dir
+    elif os.path.exists(checkpoint_path_base_dir):
+        checkpoint_path = checkpoint_path_base_dir
+    else:
+        checkpoint_path = checkpoint_path_script_dir  # Use script dir path for error message
                        
     # Use helper to get feature indices
     feat_idx = get_feature_indices(include_mesh_pos)

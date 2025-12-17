@@ -15,7 +15,6 @@ from helpers.evaluation_helper import run_final_evaluation
 from helpers.helpers import (format_training_time, create_model_hyperparams, load_config, load_trajectories_preprocessed,
                              print_training_config, setup_paths, get_feature_indices, get_device, print_overfit_samples,
                              move_any_to_device)
-# from torch.cuda.amp import autocast, GradScaler
 from torch.amp import autocast, GradScaler
 
 # Constants
@@ -295,17 +294,17 @@ def _train_one_epoch(model, train_loader, optimizer, device, velocity_idxs, stre
     avg_grad_norm = total_grad_norm / n
     return total_loss.item() / n, total_vel_loss.item() / n, total_stress_loss.item() / n, avg_grad_norm
 
-def train_egnn(device, num_workers, pin_memory):
+def train_egnn(device, num_workers, pin_memory, config_path=None):
     """Training loop"""
-    # Load configuration from YAML
-    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+
+    if config_path is None:
+        config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     config = load_config(config_path)
+
     # Extract model and training parameters
     model_cfg = config['model']
     train_cfg = config['training']
-    # Load train config
-    # datapath: processed_data/data_standard_True so add preprocessed_train.pt
-    # Resolve datapath relative to EMA_EXPERIMENT directory (one level up from script)
+    
     base_dir = os.path.dirname(os.path.dirname(__file__))
     datapath = os.path.join(base_dir, train_cfg['datapath'])
     
@@ -346,11 +345,10 @@ def train_egnn(device, num_workers, pin_memory):
             print(f"[train] CUDA free/total after dataset move:  {free / 1024 ** 3:.2f} / {total / 1024 ** 3:.2f} GB")
 
     if move_all_to_device:
-        # IMPORTANT: GPU-resident dataset + multi-worker dataloader is a footgun.
         if num_workers != 0:
             print("[train] move_all_to_device=True -> forcing num_workers=0")
         num_workers = 0
-        pin_memory = False  # irrelevant / sometimes harmful here
+        pin_memory = False  
 
     # Build dataset from these trajectories
     dataset = DefPlateDataset(list_of_trajs, world_pos_idxs=feat_idx.world_pos, velocity_idxs=feat_idx.velocity)
@@ -423,11 +421,19 @@ def train_egnn(device, num_workers, pin_memory):
     return model, test_loader, history, feat_idx, plots_dir
 
 if __name__ == "__main__":
-    cuda = False
-    num_workers = 0
-    pin_memory = False
-    device = get_device(cuda)
-    # TODO: set to false if you have compatibility problems
+    import argparse
+    parser = argparse.ArgumentParser(description='Train EGNN model')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to config YAML file (default: config.yaml)')
+    parser.add_argument('--cuda', action='store_true', default=False,
+                        help='Use CUDA if available')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Number of data loading workers (default: 4)')
+    parser.add_argument('--pin-memory', action='store_true', default=True,
+                        help='Pin memory for faster GPU transfer (default: True)')
+    args = parser.parse_args()
+    
+    device = get_device(args.cuda)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     # PyTorch 2.x:
@@ -435,6 +441,8 @@ if __name__ == "__main__":
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
-    model, test_loader, history, feat_idx, plots_dir = train_egnn(device, num_workers, pin_memory)
+    
+    config_file = args.config if args.config else os.path.join(os.path.dirname(__file__), "config.yaml")
+    model, test_loader, history, feat_idx, plots_dir = train_egnn(device, args.num_workers, args.pin_memory, config_path=config_file)
     run_final_evaluation(model, test_loader, device, history, feat_idx.velocity, feat_idx.stress, plots_dir,
-                         config_path=os.path.join(os.path.dirname(__file__), "config.yaml"))
+                         config_path=config_file)
