@@ -5,8 +5,8 @@ from tfrecord.reader import tfrecord_loader
 import os
 from helpers.helpers import get_feature_indices, load_config
 from helpers.helpers import print_debug_nodetype, print_debug_shapes_dataloader
-from data.decode_tfrecord_utils import cast_trajectory_from_record
-from data.add_world_edges import add_w_edges
+from data_helper.decode_tfrecord_utils import cast_trajectory_from_record
+from data_helper.add_world_edges import add_w_edges
 from types import SimpleNamespace
 import time
 
