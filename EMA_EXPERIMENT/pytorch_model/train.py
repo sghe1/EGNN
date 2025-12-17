@@ -4,8 +4,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 import os
 import numpy as np
-from data.defplate_dataset import DefPlateDataset, collate_unet
-from model.gunet_deforming_plate import GraphUNet_DefPlate
+from data_helper.defplate_dataset import DefPlateDataset, collate_unet
+from model_egnn.egnn_deforming_plate import EGNN_DefPlate
 from torch.optim.lr_scheduler import ExponentialLR
 import time
 from typing import List, Tuple
@@ -363,7 +363,7 @@ def train_gunet(device, num_workers, pin_memory):
 
     # Build model and optimizer
     model_hyperparams = create_model_hyperparams(model_cfg)
-    model = (GraphUNet_DefPlate(feat_idx.dim_in, DIM_OUT_VEL, DIM_OUT_STRESS, model_hyperparams, model_cfg['adj_norm'])
+    model = (EGNN_DefPlate(feat_idx.dim_in, DIM_OUT_VEL, DIM_OUT_STRESS, model_hyperparams, model_cfg['adj_norm'])
              .to(device))
 
     optimizer = optim.Adam(

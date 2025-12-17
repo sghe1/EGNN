@@ -4,8 +4,9 @@ import yaml
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from data.add_world_edges import add_w_edges_radius
-from model.gunet_deforming_plate import GraphUNet_DefPlate
+from data_helper.add_world_edges import add_w_edges_radius
+#from model.gunet_deforming_plate import EGNN_DefPlate
+from model_egnn.egnn_deforming_plate import EGNN_DefPlate
 from data_builder import build_adjacency_matrix
 from helpers.helpers import get_feature_indices, load_config
 
@@ -298,7 +299,7 @@ def rollout(model, A, X_seq_norm, mean_vec, std_vec, t0, steps, node_type, vel_i
 
     Parameters
     ----------
-    model : GraphUNet_DefPlate
+    model : EGNN_DefPlate
     A : Tensor [N,N]
         Adjacency matrix.
     X_seq_norm : Tensor [T,N,F]
@@ -518,7 +519,7 @@ def main(mesh_pos_idxs, world_pos_idxs, node_type_idxs, vel_idxs, stress_idxs, d
 
     # dim_in = X_seq_norm.shape[2]
     # Model trained to output [vx,vy,vz,stress]
-    model = GraphUNet_DefPlate(dim_in, 3, 1, myargs, adj_norm=model_cfg['adj_norm']).to(device)
+    model = EGNN_DefPlate(dim_in, 3, 1, myargs, adj_norm=model_cfg['adj_norm']).to(device)
     state = torch.load(checkpoint_path, map_location=device)
 
     # Backwards compatibility: old checkpoints used "s_gcn" instead of "start_gcn"
