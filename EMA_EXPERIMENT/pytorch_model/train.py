@@ -305,8 +305,12 @@ def train_egnn(device, num_workers, pin_memory):
     train_cfg = config['training']
     # Load train config
     # datapath: processed_data/data_standard_True so add preprocessed_train.pt
+    # Resolve datapath relative to EMA_EXPERIMENT directory (one level up from script)
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    datapath = os.path.join(base_dir, train_cfg['datapath'])
+    
     checkpoint_path, plots_dir = setup_paths(train_cfg)
-    dataconfig = load_config(train_cfg['datapath'] + '/used_dataconfig.yaml')
+    dataconfig = load_config(os.path.join(datapath, 'used_dataconfig.yaml'))
     include_mesh_pos = dataconfig['include_mesh_pos']
     feat_idx = get_feature_indices(include_mesh_pos)
     torch.manual_seed(train_cfg['random_seed'])
@@ -316,17 +320,17 @@ def train_egnn(device, num_workers, pin_memory):
     print("\n=================================================")
     print(" LOADING PREPROCESSED DATA")
     print("=================================================\n")
-    print(f"\t Preprocessed data: {train_cfg['datapath']}")
+    print(f"\t Preprocessed data: {datapath}")
 
     # Load preprocessed trajectories
-    if not os.path.exists(train_cfg['datapath']):
+    if not os.path.exists(datapath):
         raise FileNotFoundError(
-            f"Preprocessed data not found at {train_cfg['datapath']}\n"
+            f"Preprocessed data not found at {datapath}\n"
             f"Please run 'python preprocess_data.py' first to generate the preprocessed data."
         )
 
     list_of_trajs = load_trajectories_preprocessed(
-        train_cfg['datapath'] + "/preprocessed_train.pt", train_cfg['num_train_trajs']
+        os.path.join(datapath, "preprocessed_train.pt"), train_cfg['num_train_trajs']
     )
     if move_all_to_device:
         if device.type == "cuda":

@@ -79,7 +79,10 @@ class EGNN_DefPlate(nn.Module):
         self.phi_x = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), SiLU(), nn.Linear(hidden_dim, 1))
 
         # Learnable parameter for residual connection
-        self.C = nn.Parameter(torch.tensor(0.001))
+        # Initialize with sentinel value; will be set to 1/(N-1) on first forward pass
+        # Checkpoint loading will overwrite this if C was already trained
+        self.C = nn.Parameter(torch.tensor(-1.0))
+        self.register_buffer('_c_initialized', torch.tensor(False))
 
         # Stress Head
         self.stress_head = nn.Sequential(
@@ -158,6 +161,19 @@ class EGNN_DefPlate(nn.Module):
         Process a single graph.
         This EGNN fork expects adj_mat as a boolean mask and derives neighborhoods internally.
         """
+        # Lazy initialization of C: set to 1/(N-1) on first forward if not already initialized
+        # (e.g., from checkpoint loading). If C was loaded from checkpoint (C != -1.0), skip init.
+        N = x.shape[0]
+        if not self._c_initialized.item():
+            # Check if C was loaded from checkpoint (not sentinel value)
+            if self.C.item() < 0:
+                # Initialize C = 1/(N-1), with fallback for edge cases
+                c_init = 1.0 / (N - 1) if N > 1 else 1e-3
+                with torch.no_grad():
+                    self.C.data.fill_(c_init)
+            # Mark as initialized regardless (either from checkpoint or just initialized)
+            self._c_initialized.fill_(True)
+        
         pos = x[:, self.pos_slice]
 
         # Concatenate features excluding coords
