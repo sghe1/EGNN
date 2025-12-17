@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from egnn_pytorch import EGNN_Network
+from .egnn_pytorch import EGNN_Network
 
 class SiLU(nn.Module):
     def forward(self, x):

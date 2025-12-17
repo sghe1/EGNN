@@ -295,7 +295,7 @@ def _train_one_epoch(model, train_loader, optimizer, device, velocity_idxs, stre
     avg_grad_norm = total_grad_norm / n
     return total_loss.item() / n, total_vel_loss.item() / n, total_stress_loss.item() / n, avg_grad_norm
 
-def train_gunet(device, num_workers, pin_memory):
+def train_egnn(device, num_workers, pin_memory):
     """Training loop"""
     # Load configuration from YAML
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -431,6 +431,6 @@ if __name__ == "__main__":
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
-    model, test_loader, history, feat_idx, plots_dir = train_gunet(device, num_workers, pin_memory)
+    model, test_loader, history, feat_idx, plots_dir = train_egnn(device, num_workers, pin_memory)
     run_final_evaluation(model, test_loader, device, history, feat_idx.velocity, feat_idx.stress, plots_dir,
                          config_path=os.path.join(os.path.dirname(__file__), "config.yaml"))
