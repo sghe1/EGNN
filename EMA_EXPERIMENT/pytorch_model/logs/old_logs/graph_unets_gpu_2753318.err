@@ -1,0 +1,34 @@
+Train:   0%|          | 0/1 [00:00<?, ?it/s]                                            Traceback (most recent call last):
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 434, in <module>
+    model, test_loader, history, feat_idx, plots_dir = train_egnn(device, num_workers, pin_memory)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 386, in train_egnn
+    train_loss, train_vel, train_stress, grad_norm = _train_one_epoch(model, train_loader, optimizer, device,
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 265, in _train_one_epoch
+    preds_list = model(adj_mat_list, feat_t_mat_list, feat_tp1_mat_list, node_types)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_deforming_plate.py", line 79, in forward
+    return self.embed(batch_adj_A, batch_feat_X)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_deforming_plate.py", line 87, in embed
+    return [self.embed_one(A, X) for A, X in zip(adj_A_list, X_list)]
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_deforming_plate.py", line 87, in <listcomp>
+    return [self.embed_one(A, X) for A, X in zip(adj_A_list, X_list)]
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_deforming_plate.py", line 142, in embed_one
+    h_updated, _ = self.egnn_layers(h_emb, pos_b, adj_mat=adj_b, edges=edges_b)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_pytorch.py", line 448, in forward
+    feats, coors = egnn(feats, coors, adj_mat = adj_mat, edges = edges, mask = mask)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_pytorch.py", line 266, in forward
+    edges = batched_index_select(edges, nbhd_indices, dim = 2)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_pytorch.py", line 32, in batched_index_select
+    return values.gather(dim, indices)
+RuntimeError: Size does not match at dimension 1 expected index [1, 840, 89] to be smaller than self [1, 2, 12107] apart from dimension 2

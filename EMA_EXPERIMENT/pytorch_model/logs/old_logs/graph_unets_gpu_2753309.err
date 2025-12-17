@@ -1,0 +1,12 @@
+Train:   0%|          | 0/1 [00:00<?, ?it/s]                                            Traceback (most recent call last):
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 434, in <module>
+    model, test_loader, history, feat_idx, plots_dir = train_egnn(device, num_workers, pin_memory)
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 386, in train_egnn
+    train_loss, train_vel, train_stress, grad_norm = _train_one_epoch(model, train_loader, optimizer, device,
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 265, in _train_one_epoch
+    preds_list = model(adj_mat_list, feat_t_mat_list, feat_tp1_mat_list, node_types)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/durante/Graph-U-Nets/venvs/gnn/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+TypeError: EGNN_DefPlate.forward() takes from 3 to 4 positional arguments but 5 were given

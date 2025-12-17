@@ -1,0 +1,218 @@
+Running on node: ixl02
+GPUs visible: 0
+Start: mer 17 déc 2025 13:04:37 CET
+[get_device] Using CUDA device: Tesla V100-SXM2-32GB
+
+=================================================
+ LOADING PREPROCESSED DATA
+=================================================
+
+	 Preprocessed data: processed_data/data_world=radius_mesh=True_norm=standard_At=False
+[load_trajectories_preprocessed] Tensor payload size: 0.02 GB
+	 [load_trajectories_preprocessed] Loaded 1 preprocessed trajectories
+[train] CUDA free/total before dataset move: 31.44 / 31.74 GB
+[train] Moving all trajectories to cuda ...
+[train] CUDA free/total after dataset move:  31.42 / 31.74 GB
+Total training pairs (X_t, X_t+1): 399
+
+Overfitting on trajectory 0 with 4 time steps
+Overfitting on the following (traj_id, time_idx) pairs:
+  sample 00: traj_id=0, t=0
+  sample 01: traj_id=0, t=1
+  sample 02: traj_id=0, t=2
+  sample 03: traj_id=0, t=3
+
+=================================================
+                  TRAINING
+=================================================
+
+Epochs: 500
+Batch size: 4
+Start learning rate: 0.001
+Mode: overfit
+Weight decay: 0
+Number of trajectories: 1
+Train loader batches: 1
+
+[Train] [Epoch 000] Train Loss: 10.811014 | Test Loss: 37.370319 | Vel Loss: 8.454449 | Stress Loss: 2.356566 | LR: 0.000999
+[Train] [Epoch 001] Train Loss: 37.370319 | Test Loss: 13.209402 | Vel Loss: 10.545574 | Stress Loss: 26.824745 | LR: 0.000998
+[Train] [Epoch 002] Train Loss: 13.209402 | Test Loss: 96.101547 | Vel Loss: 9.089952 | Stress Loss: 4.119451 | LR: 0.000997
+[Train] [Epoch 003] Train Loss: 96.101547 | Test Loss: 9.277420 | Vel Loss: 25.184563 | Stress Loss: 70.916992 | LR: 0.000996
+[Train] [Epoch 004] Train Loss: 9.277420 | Test Loss: 4.635584 | Vel Loss: 5.464230 | Stress Loss: 3.813190 | LR: 0.000995
+[Train] [Epoch 005] Train Loss: 4.635584 | Test Loss: 2.985242 | Vel Loss: 1.611739 | Stress Loss: 3.023846 | LR: 0.000994
+[Train] [Epoch 006] Train Loss: 2.985242 | Test Loss: 3.602292 | Vel Loss: 1.387545 | Stress Loss: 1.597698 | LR: 0.000993
+[Train] [Epoch 007] Train Loss: 3.602292 | Test Loss: 0.990666 | Vel Loss: 1.439835 | Stress Loss: 2.162456 | LR: 0.000992
+[Train] [Epoch 008] Train Loss: 0.990666 | Test Loss: 1.485390 | Vel Loss: 0.571119 | Stress Loss: 0.419546 | LR: 0.000991
+[Train] [Epoch 009] Train Loss: 1.485390 | Test Loss: 0.776620 | Vel Loss: 1.031447 | Stress Loss: 0.453943 | LR: 0.000990
+[Train] [Epoch 010] Train Loss: 0.776620 | Test Loss: 0.572238 | Vel Loss: 0.561113 | Stress Loss: 0.215506 | LR: 0.000989
+[Train] [Epoch 011] Train Loss: 0.572238 | Test Loss: 0.625897 | Vel Loss: 0.409479 | Stress Loss: 0.162758 | LR: 0.000988
+[Train] [Epoch 012] Train Loss: 0.625897 | Test Loss: 0.545034 | Vel Loss: 0.511994 | Stress Loss: 0.113903 | LR: 0.000987
+[Train] [Epoch 013] Train Loss: 0.545034 | Test Loss: 0.435778 | Vel Loss: 0.412992 | Stress Loss: 0.132043 | LR: 0.000986
+[Train] [Epoch 014] Train Loss: 0.435778 | Test Loss: 0.285825 | Vel Loss: 0.316761 | Stress Loss: 0.119017 | LR: 0.000985
+[Train] [Epoch 015] Train Loss: 0.285825 | Test Loss: 0.313986 | Vel Loss: 0.233891 | Stress Loss: 0.051934 | LR: 0.000984
+[Train] [Epoch 016] Train Loss: 0.313986 | Test Loss: 0.263642 | Vel Loss: 0.235737 | Stress Loss: 0.078249 | LR: 0.000983
+[Train] [Epoch 017] Train Loss: 0.263642 | Test Loss: 0.192278 | Vel Loss: 0.228017 | Stress Loss: 0.035625 | LR: 0.000982
+[Train] [Epoch 018] Train Loss: 0.192278 | Test Loss: 0.153906 | Vel Loss: 0.159448 | Stress Loss: 0.032830 | LR: 0.000981
+[Train] [Epoch 019] Train Loss: 0.153906 | Test Loss: 0.149489 | Vel Loss: 0.120383 | Stress Loss: 0.033523 | LR: 0.000980
+[Train] [Epoch 020] Train Loss: 0.149489 | Test Loss: 0.076654 | Vel Loss: 0.109688 | Stress Loss: 0.039801 | LR: 0.000979
+[Train] [Epoch 021] Train Loss: 0.076654 | Test Loss: 0.118970 | Vel Loss: 0.060724 | Stress Loss: 0.015929 | LR: 0.000978
+[Train] [Epoch 022] Train Loss: 0.118970 | Test Loss: 0.101754 | Vel Loss: 0.078941 | Stress Loss: 0.040028 | LR: 0.000977
+[Train] [Epoch 023] Train Loss: 0.101754 | Test Loss: 0.086962 | Vel Loss: 0.074870 | Stress Loss: 0.026883 | LR: 0.000976
+[Train] [Epoch 024] Train Loss: 0.086962 | Test Loss: 0.072263 | Vel Loss: 0.055511 | Stress Loss: 0.031451 | LR: 0.000975
+[Train] [Epoch 025] Train Loss: 0.072263 | Test Loss: 0.045673 | Vel Loss: 0.049615 | Stress Loss: 0.022648 | LR: 0.000974
+[Train] [Epoch 026] Train Loss: 0.045673 | Test Loss: 0.054321 | Vel Loss: 0.027300 | Stress Loss: 0.018373 | LR: 0.000973
+[Train] [Epoch 027] Train Loss: 0.054321 | Test Loss: 0.050873 | Vel Loss: 0.029377 | Stress Loss: 0.024944 | LR: 0.000972
+[Train] [Epoch 028] Train Loss: 0.050873 | Test Loss: 0.036333 | Vel Loss: 0.035524 | Stress Loss: 0.015348 | LR: 0.000971
+[Train] [Epoch 029] Train Loss: 0.036333 | Test Loss: 0.038355 | Vel Loss: 0.025702 | Stress Loss: 0.010631 | LR: 0.000970
+[Train] [Epoch 030] Train Loss: 0.038355 | Test Loss: 0.036364 | Vel Loss: 0.024931 | Stress Loss: 0.013424 | LR: 0.000969
+[Train] [Epoch 031] Train Loss: 0.036364 | Test Loss: 0.036316 | Vel Loss: 0.025420 | Stress Loss: 0.010945 | LR: 0.000968
+[Train] [Epoch 032] Train Loss: 0.036316 | Test Loss: 0.030729 | Vel Loss: 0.027812 | Stress Loss: 0.008505 | LR: 0.000968
+[Train] [Epoch 033] Train Loss: 0.030729 | Test Loss: 0.023320 | Vel Loss: 0.020963 | Stress Loss: 0.009767 | LR: 0.000967
+[Train] [Epoch 034] Train Loss: 0.023320 | Test Loss: 0.025315 | Vel Loss: 0.016148 | Stress Loss: 0.007172 | LR: 0.000966
+[Train] [Epoch 035] Train Loss: 0.025315 | Test Loss: 0.027064 | Vel Loss: 0.018171 | Stress Loss: 0.007144 | LR: 0.000965
+[Train] [Epoch 036] Train Loss: 0.027064 | Test Loss: 0.021656 | Vel Loss: 0.018274 | Stress Loss: 0.008790 | LR: 0.000964
+[Train] [Epoch 037] Train Loss: 0.021656 | Test Loss: 0.019990 | Vel Loss: 0.015572 | Stress Loss: 0.006084 | LR: 0.000963
+[Train] [Epoch 038] Train Loss: 0.019990 | Test Loss: 0.020726 | Vel Loss: 0.014155 | Stress Loss: 0.005836 | LR: 0.000962
+[Train] [Epoch 039] Train Loss: 0.020726 | Test Loss: 0.016202 | Vel Loss: 0.014072 | Stress Loss: 0.006654 | LR: 0.000961
+[Train] [Epoch 040] Train Loss: 0.016202 | Test Loss: 0.013689 | Vel Loss: 0.011255 | Stress Loss: 0.004947 | LR: 0.000960
+[Train] [Epoch 041] Train Loss: 0.013689 | Test Loss: 0.013308 | Vel Loss: 0.009034 | Stress Loss: 0.004655 | LR: 0.000959
+[Train] [Epoch 042] Train Loss: 0.013308 | Test Loss: 0.011920 | Vel Loss: 0.009663 | Stress Loss: 0.003645 | LR: 0.000958
+[Train] [Epoch 043] Train Loss: 0.011920 | Test Loss: 0.009998 | Vel Loss: 0.008735 | Stress Loss: 0.003185 | LR: 0.000957
+[Train] [Epoch 044] Train Loss: 0.009998 | Test Loss: 0.010705 | Vel Loss: 0.006442 | Stress Loss: 0.003556 | LR: 0.000956
+[Train] [Epoch 045] Train Loss: 0.010705 | Test Loss: 0.012051 | Vel Loss: 0.007472 | Stress Loss: 0.003233 | LR: 0.000955
+[Train] [Epoch 046] Train Loss: 0.012051 | Test Loss: 0.008813 | Vel Loss: 0.008626 | Stress Loss: 0.003425 | LR: 0.000954
+[Train] [Epoch 047] Train Loss: 0.008813 | Test Loss: 0.008028 | Vel Loss: 0.005891 | Stress Loss: 0.002922 | LR: 0.000953
+[Train] [Epoch 048] Train Loss: 0.008028 | Test Loss: 0.008121 | Vel Loss: 0.005489 | Stress Loss: 0.002540 | LR: 0.000952
+[Train] [Epoch 049] Train Loss: 0.008121 | Test Loss: 0.006596 | Vel Loss: 0.006043 | Stress Loss: 0.002078 | LR: 0.000951
+[Train] [Epoch 050] Train Loss: 0.006596 | Test Loss: 0.007231 | Vel Loss: 0.004933 | Stress Loss: 0.001663 | LR: 0.000950
+[Train] [Epoch 051] Train Loss: 0.007231 | Test Loss: 0.006560 | Vel Loss: 0.005640 | Stress Loss: 0.001591 | LR: 0.000949
+[Train] [Epoch 052] Train Loss: 0.006560 | Test Loss: 0.005947 | Vel Loss: 0.004865 | Stress Loss: 0.001695 | LR: 0.000948
+[Train] [Epoch 053] Train Loss: 0.005947 | Test Loss: 0.006671 | Vel Loss: 0.003896 | Stress Loss: 0.002051 | LR: 0.000947
+[Train] [Epoch 054] Train Loss: 0.006671 | Test Loss: 0.006829 | Vel Loss: 0.004600 | Stress Loss: 0.002072 | LR: 0.000946
+[Train] [Epoch 055] Train Loss: 0.006829 | Test Loss: 0.005995 | Vel Loss: 0.004666 | Stress Loss: 0.002163 | LR: 0.000946
+[Train] [Epoch 056] Train Loss: 0.005995 | Test Loss: 0.005287 | Vel Loss: 0.003740 | Stress Loss: 0.002254 | LR: 0.000945
+[Train] [Epoch 057] Train Loss: 0.005287 | Test Loss: 0.005362 | Vel Loss: 0.003369 | Stress Loss: 0.001919 | LR: 0.000944
+[Train] [Epoch 058] Train Loss: 0.005362 | Test Loss: 0.005008 | Vel Loss: 0.003491 | Stress Loss: 0.001871 | LR: 0.000943
+[Train] [Epoch 059] Train Loss: 0.005008 | Test Loss: 0.004626 | Vel Loss: 0.003319 | Stress Loss: 0.001689 | LR: 0.000942
+[Train] [Epoch 060] Train Loss: 0.004626 | Test Loss: 0.004584 | Vel Loss: 0.003171 | Stress Loss: 0.001456 | LR: 0.000941
+[Train] [Epoch 061] Train Loss: 0.004584 | Test Loss: 0.004136 | Vel Loss: 0.003071 | Stress Loss: 0.001513 | LR: 0.000940
+[Train] [Epoch 062] Train Loss: 0.004136 | Test Loss: 0.004118 | Vel Loss: 0.002770 | Stress Loss: 0.001366 | LR: 0.000939
+[Train] [Epoch 063] Train Loss: 0.004118 | Test Loss: 0.004208 | Vel Loss: 0.002755 | Stress Loss: 0.001363 | LR: 0.000938
+[Train] [Epoch 064] Train Loss: 0.004208 | Test Loss: 0.003759 | Vel Loss: 0.002859 | Stress Loss: 0.001349 | LR: 0.000937
+[Train] [Epoch 065] Train Loss: 0.003759 | Test Loss: 0.003578 | Vel Loss: 0.002557 | Stress Loss: 0.001202 | LR: 0.000936
+[Train] [Epoch 066] Train Loss: 0.003578 | Test Loss: 0.003532 | Vel Loss: 0.002318 | Stress Loss: 0.001260 | LR: 0.000935
+[Train] [Epoch 067] Train Loss: 0.003532 | Test Loss: 0.003400 | Vel Loss: 0.002348 | Stress Loss: 0.001184 | LR: 0.000934
+[Train] [Epoch 068] Train Loss: 0.003400 | Test Loss: 0.003286 | Vel Loss: 0.002219 | Stress Loss: 0.001181 | LR: 0.000933
+[Train] [Epoch 069] Train Loss: 0.003286 | Test Loss: 0.003192 | Vel Loss: 0.002063 | Stress Loss: 0.001223 | LR: 0.000932
+[Train] [Epoch 070] Train Loss: 0.003192 | Test Loss: 0.003262 | Vel Loss: 0.002076 | Stress Loss: 0.001116 | LR: 0.000931
+[Train] [Epoch 071] Train Loss: 0.003262 | Test Loss: 0.003148 | Vel Loss: 0.002085 | Stress Loss: 0.001177 | LR: 0.000930
+[Train] [Epoch 072] Train Loss: 0.003148 | Test Loss: 0.003081 | Vel Loss: 0.002032 | Stress Loss: 0.001116 | LR: 0.000930
+[Train] [Epoch 073] Train Loss: 0.003081 | Test Loss: 0.003024 | Vel Loss: 0.001994 | Stress Loss: 0.001087 | LR: 0.000929
+[Train] [Epoch 074] Train Loss: 0.003024 | Test Loss: 0.002844 | Vel Loss: 0.001932 | Stress Loss: 0.001092 | LR: 0.000928
+[Train] [Epoch 075] Train Loss: 0.002844 | Test Loss: 0.002830 | Vel Loss: 0.001826 | Stress Loss: 0.001017 | LR: 0.000927
+[Train] [Epoch 076] Train Loss: 0.002830 | Test Loss: 0.002766 | Vel Loss: 0.001778 | Stress Loss: 0.001053 | LR: 0.000926
+[Train] [Epoch 077] Train Loss: 0.002766 | Test Loss: 0.002700 | Vel Loss: 0.001767 | Stress Loss: 0.000999 | LR: 0.000925
+[Train] [Epoch 078] Train Loss: 0.002700 | Test Loss: 0.002698 | Vel Loss: 0.001714 | Stress Loss: 0.000986 | LR: 0.000924
+[Train] [Epoch 079] Train Loss: 0.002698 | Test Loss: 0.002698 | Vel Loss: 0.001713 | Stress Loss: 0.000985 | LR: 0.000923
+[Train] [Epoch 080] Train Loss: 0.002698 | Test Loss: 0.002661 | Vel Loss: 0.001753 | Stress Loss: 0.000944 | LR: 0.000922
+[Train] [Epoch 081] Train Loss: 0.002661 | Test Loss: 0.002582 | Vel Loss: 0.001701 | Stress Loss: 0.000960 | LR: 0.000921
+[Train] [Epoch 082] Train Loss: 0.002582 | Test Loss: 0.002571 | Vel Loss: 0.001644 | Stress Loss: 0.000937 | LR: 0.000920
+[Train] [Epoch 083] Train Loss: 0.002571 | Test Loss: 0.002512 | Vel Loss: 0.001633 | Stress Loss: 0.000937 | LR: 0.000919
+[Train] [Epoch 084] Train Loss: 0.002512 | Test Loss: 0.002472 | Vel Loss: 0.001586 | Stress Loss: 0.000926 | LR: 0.000918
+[Train] [Epoch 085] Train Loss: 0.002472 | Test Loss: 0.002458 | Vel Loss: 0.001552 | Stress Loss: 0.000919 | LR: 0.000918
+[Train] [Epoch 086] Train Loss: 0.002458 | Test Loss: 0.002407 | Vel Loss: 0.001541 | Stress Loss: 0.000917 | LR: 0.000917
+[Train] [Epoch 087] Train Loss: 0.002407 | Test Loss: 0.002403 | Vel Loss: 0.001507 | Stress Loss: 0.000900 | LR: 0.000916
+[Train] [Epoch 088] Train Loss: 0.002403 | Test Loss: 0.002384 | Vel Loss: 0.001496 | Stress Loss: 0.000908 | LR: 0.000915
+[Train] [Epoch 089] Train Loss: 0.002384 | Test Loss: 0.002351 | Vel Loss: 0.001489 | Stress Loss: 0.000895 | LR: 0.000914
+[Train] [Epoch 090] Train Loss: 0.002351 | Test Loss: 0.002318 | Vel Loss: 0.001455 | Stress Loss: 0.000896 | LR: 0.000913
+[Train] [Epoch 091] Train Loss: 0.002318 | Test Loss: 0.002306 | Vel Loss: 0.001438 | Stress Loss: 0.000880 | LR: 0.000912
+[Train] [Epoch 092] Train Loss: 0.002306 | Test Loss: 0.002283 | Vel Loss: 0.001435 | Stress Loss: 0.000871 | LR: 0.000911
+[Train] [Epoch 093] Train Loss: 0.002283 | Test Loss: 0.002249 | Vel Loss: 0.001412 | Stress Loss: 0.000870 | LR: 0.000910
+[Train] [Epoch 094] Train Loss: 0.002249 | Test Loss: 0.002243 | Vel Loss: 0.001393 | Stress Loss: 0.000856 | LR: 0.000909
+[Train] [Epoch 095] Train Loss: 0.002243 | Test Loss: 0.002220 | Vel Loss: 0.001389 | Stress Loss: 0.000855 | LR: 0.000908
+[Train] [Epoch 096] Train Loss: 0.002220 | Test Loss: 0.002208 | Vel Loss: 0.001378 | Stress Loss: 0.000841 | LR: 0.000908
+[Train] [Epoch 097] Train Loss: 0.002208 | Test Loss: 0.002194 | Vel Loss: 0.001365 | Stress Loss: 0.000843 | LR: 0.000907
+[Train] [Epoch 098] Train Loss: 0.002194 | Test Loss: 0.002175 | Vel Loss: 0.001356 | Stress Loss: 0.000838 | LR: 0.000906
+[Train] [Epoch 099] Train Loss: 0.002175 | Test Loss: 0.002159 | Vel Loss: 0.001342 | Stress Loss: 0.000833 | LR: 0.000905
+[Train] [Epoch 100] Train Loss: 0.002159 | Test Loss: 0.002145 | Vel Loss: 0.001329 | Stress Loss: 0.000830 | LR: 0.000904
+[Train] [Epoch 101] Train Loss: 0.002145 | Test Loss: 0.002130 | Vel Loss: 0.001322 | Stress Loss: 0.000823 | LR: 0.000903
+[Train] [Epoch 102] Train Loss: 0.002130 | Test Loss: 0.002112 | Vel Loss: 0.001308 | Stress Loss: 0.000822 | LR: 0.000902
+[Train] [Epoch 103] Train Loss: 0.002112 | Test Loss: 0.002106 | Vel Loss: 0.001298 | Stress Loss: 0.000814 | LR: 0.000901
+[Train] [Epoch 104] Train Loss: 0.002106 | Test Loss: 0.002092 | Vel Loss: 0.001296 | Stress Loss: 0.000810 | LR: 0.000900
+[Train] [Epoch 105] Train Loss: 0.002092 | Test Loss: 0.002081 | Vel Loss: 0.001285 | Stress Loss: 0.000807 | LR: 0.000899
+[Train] [Epoch 106] Train Loss: 0.002081 | Test Loss: 0.002070 | Vel Loss: 0.001274 | Stress Loss: 0.000807 | LR: 0.000898
+[Train] [Epoch 107] Train Loss: 0.002070 | Test Loss: 0.002056 | Vel Loss: 0.001268 | Stress Loss: 0.000802 | LR: 0.000898
+[Train] [Epoch 108] Train Loss: 0.002056 | Test Loss: 0.002043 | Vel Loss: 0.001259 | Stress Loss: 0.000797 | LR: 0.000897
+[Train] [Epoch 109] Train Loss: 0.002043 | Test Loss: 0.002032 | Vel Loss: 0.001250 | Stress Loss: 0.000793 | LR: 0.000896
+[Train] [Epoch 110] Train Loss: 0.002032 | Test Loss: 0.002021 | Vel Loss: 0.001243 | Stress Loss: 0.000790 | LR: 0.000895
+[Train] [Epoch 111] Train Loss: 0.002021 | Test Loss: 0.002010 | Vel Loss: 0.001234 | Stress Loss: 0.000787 | LR: 0.000894
+[Train] [Epoch 112] Train Loss: 0.002010 | Test Loss: 0.002002 | Vel Loss: 0.001227 | Stress Loss: 0.000782 | LR: 0.000893
+[Train] [Epoch 113] Train Loss: 0.002002 | Test Loss: 0.001992 | Vel Loss: 0.001221 | Stress Loss: 0.000782 | LR: 0.000892
+[Train] [Epoch 114] Train Loss: 0.001992 | Test Loss: 0.001982 | Vel Loss: 0.001213 | Stress Loss: 0.000779 | LR: 0.000891
+[Train] [Epoch 115] Train Loss: 0.001982 | Test Loss: 0.001972 | Vel Loss: 0.001206 | Stress Loss: 0.000777 | LR: 0.000890
+[Train] [Epoch 116] Train Loss: 0.001972 | Test Loss: 0.001962 | Vel Loss: 0.001200 | Stress Loss: 0.000773 | LR: 0.000890
+[Train] [Epoch 117] Train Loss: 0.001962 | Test Loss: 0.001953 | Vel Loss: 0.001192 | Stress Loss: 0.000770 | LR: 0.000889
+[Train] [Epoch 118] Train Loss: 0.001953 | Test Loss: 0.001945 | Vel Loss: 0.001186 | Stress Loss: 0.000768 | LR: 0.000888
+[Train] [Epoch 119] Train Loss: 0.001945 | Test Loss: 0.001936 | Vel Loss: 0.001181 | Stress Loss: 0.000764 | LR: 0.000887
+[Train] [Epoch 120] Train Loss: 0.001936 | Test Loss: 0.001928 | Vel Loss: 0.001174 | Stress Loss: 0.000762 | LR: 0.000886
+[Train] [Epoch 121] Train Loss: 0.001928 | Test Loss: 0.001921 | Vel Loss: 0.001169 | Stress Loss: 0.000759 | LR: 0.000885
+[Train] [Epoch 122] Train Loss: 0.001921 | Test Loss: 0.001913 | Vel Loss: 0.001164 | Stress Loss: 0.000757 | LR: 0.000884
+[Train] [Epoch 123] Train Loss: 0.001913 | Test Loss: 0.001905 | Vel Loss: 0.001157 | Stress Loss: 0.000755 | LR: 0.000883
+[Train] [Epoch 124] Train Loss: 0.001905 | Test Loss: 0.001897 | Vel Loss: 0.001152 | Stress Loss: 0.000753 | LR: 0.000882
+[Train] [Epoch 125] Train Loss: 0.001897 | Test Loss: 0.001890 | Vel Loss: 0.001147 | Stress Loss: 0.000751 | LR: 0.000882
+[Train] [Epoch 126] Train Loss: 0.001890 | Test Loss: 0.001882 | Vel Loss: 0.001142 | Stress Loss: 0.000748 | LR: 0.000881
+[Train] [Epoch 127] Train Loss: 0.001882 | Test Loss: 0.001875 | Vel Loss: 0.001137 | Stress Loss: 0.000746 | LR: 0.000880
+[Train] [Epoch 128] Train Loss: 0.001875 | Test Loss: 0.001868 | Vel Loss: 0.001132 | Stress Loss: 0.000743 | LR: 0.000879
+[Train] [Epoch 129] Train Loss: 0.001868 | Test Loss: 0.001862 | Vel Loss: 0.001127 | Stress Loss: 0.000741 | LR: 0.000878
+[Train] [Epoch 130] Train Loss: 0.001862 | Test Loss: 0.001855 | Vel Loss: 0.001122 | Stress Loss: 0.000740 | LR: 0.000877
+[Train] [Epoch 131] Train Loss: 0.001855 | Test Loss: 0.001848 | Vel Loss: 0.001117 | Stress Loss: 0.000737 | LR: 0.000876
+[Train] [Epoch 132] Train Loss: 0.001848 | Test Loss: 0.001842 | Vel Loss: 0.001113 | Stress Loss: 0.000735 | LR: 0.000875
+[Train] [Epoch 133] Train Loss: 0.001842 | Test Loss: 0.001835 | Vel Loss: 0.001108 | Stress Loss: 0.000733 | LR: 0.000875
+[Train] [Epoch 134] Train Loss: 0.001835 | Test Loss: 0.001829 | Vel Loss: 0.001104 | Stress Loss: 0.000731 | LR: 0.000874
+[Train] [Epoch 135] Train Loss: 0.001829 | Test Loss: 0.001823 | Vel Loss: 0.001099 | Stress Loss: 0.000730 | LR: 0.000873
+[Train] [Epoch 136] Train Loss: 0.001823 | Test Loss: 0.001817 | Vel Loss: 0.001095 | Stress Loss: 0.000728 | LR: 0.000872
+[Train] [Epoch 137] Train Loss: 0.001817 | Test Loss: 0.001811 | Vel Loss: 0.001090 | Stress Loss: 0.000726 | LR: 0.000871
+[Train] [Epoch 138] Train Loss: 0.001811 | Test Loss: 0.001805 | Vel Loss: 0.001086 | Stress Loss: 0.000725 | LR: 0.000870
+[Train] [Epoch 139] Train Loss: 0.001805 | Test Loss: 0.001799 | Vel Loss: 0.001082 | Stress Loss: 0.000723 | LR: 0.000869
+[Train] [Epoch 140] Train Loss: 0.001799 | Test Loss: 0.001794 | Vel Loss: 0.001078 | Stress Loss: 0.000721 | LR: 0.000868
+[Train] [Epoch 141] Train Loss: 0.001794 | Test Loss: 0.001788 | Vel Loss: 0.001074 | Stress Loss: 0.000720 | LR: 0.000868
+[Train] [Epoch 142] Train Loss: 0.001788 | Test Loss: 0.001783 | Vel Loss: 0.001070 | Stress Loss: 0.000718 | LR: 0.000867
+[Train] [Epoch 143] Train Loss: 0.001783 | Test Loss: 0.001777 | Vel Loss: 0.001066 | Stress Loss: 0.000716 | LR: 0.000866
+[Train] [Epoch 144] Train Loss: 0.001777 | Test Loss: 0.001772 | Vel Loss: 0.001063 | Stress Loss: 0.000715 | LR: 0.000865
+[Train] [Epoch 145] Train Loss: 0.001772 | Test Loss: 0.001767 | Vel Loss: 0.001059 | Stress Loss: 0.000713 | LR: 0.000864
+[Train] [Epoch 146] Train Loss: 0.001767 | Test Loss: 0.001762 | Vel Loss: 0.001055 | Stress Loss: 0.000711 | LR: 0.000863
+[Train] [Epoch 147] Train Loss: 0.001762 | Test Loss: 0.001757 | Vel Loss: 0.001052 | Stress Loss: 0.000710 | LR: 0.000862
+[Train] [Epoch 148] Train Loss: 0.001757 | Test Loss: 0.001752 | Vel Loss: 0.001048 | Stress Loss: 0.000708 | LR: 0.000862
+[Train] [Epoch 149] Train Loss: 0.001752 | Test Loss: 0.001747 | Vel Loss: 0.001045 | Stress Loss: 0.000707 | LR: 0.000861
+[Train] [Epoch 150] Train Loss: 0.001747 | Test Loss: 0.001742 | Vel Loss: 0.001041 | Stress Loss: 0.000705 | LR: 0.000860
+[Train] [Epoch 151] Train Loss: 0.001742 | Test Loss: 0.001737 | Vel Loss: 0.001038 | Stress Loss: 0.000704 | LR: 0.000859
+[Train] [Epoch 152] Train Loss: 0.001737 | Test Loss: 0.001733 | Vel Loss: 0.001035 | Stress Loss: 0.000703 | LR: 0.000858
+[Train] [Epoch 153] Train Loss: 0.001733 | Test Loss: 0.001728 | Vel Loss: 0.001031 | Stress Loss: 0.000701 | LR: 0.000857
+[Train] [Epoch 154] Train Loss: 0.001728 | Test Loss: 0.001723 | Vel Loss: 0.001028 | Stress Loss: 0.000700 | LR: 0.000856
+[Train] [Epoch 155] Train Loss: 0.001723 | Test Loss: 0.001719 | Vel Loss: 0.001025 | Stress Loss: 0.000699 | LR: 0.000855
+[Train] [Epoch 156] Train Loss: 0.001719 | Test Loss: 0.001714 | Vel Loss: 0.001022 | Stress Loss: 0.000697 | LR: 0.000855
+[Train] [Epoch 157] Train Loss: 0.001714 | Test Loss: 0.001710 | Vel Loss: 0.001019 | Stress Loss: 0.000696 | LR: 0.000854
+[Train] [Epoch 158] Train Loss: 0.001710 | Test Loss: 0.001706 | Vel Loss: 0.001015 | Stress Loss: 0.000695 | LR: 0.000853
+[Train] [Epoch 159] Train Loss: 0.001706 | Test Loss: 0.001702 | Vel Loss: 0.001012 | Stress Loss: 0.000693 | LR: 0.000852
+[Train] [Epoch 160] Train Loss: 0.001702 | Test Loss: 0.001697 | Vel Loss: 0.001010 | Stress Loss: 0.000692 | LR: 0.000851
+[Train] [Epoch 161] Train Loss: 0.001697 | Test Loss: 0.001693 | Vel Loss: 0.001007 | Stress Loss: 0.000691 | LR: 0.000850
+[Train] [Epoch 162] Train Loss: 0.001693 | Test Loss: 0.001689 | Vel Loss: 0.001004 | Stress Loss: 0.000689 | LR: 0.000850
+[Train] [Epoch 163] Train Loss: 0.001689 | Test Loss: 0.001685 | Vel Loss: 0.001001 | Stress Loss: 0.000688 | LR: 0.000849
+[Train] [Epoch 164] Train Loss: 0.001685 | Test Loss: 0.001681 | Vel Loss: 0.000998 | Stress Loss: 0.000687 | LR: 0.000848
+[Train] [Epoch 165] Train Loss: 0.001681 | Test Loss: 0.001677 | Vel Loss: 0.000995 | Stress Loss: 0.000686 | LR: 0.000847
+[Train] [Epoch 166] Train Loss: 0.001677 | Test Loss: 0.001673 | Vel Loss: 0.000992 | Stress Loss: 0.000685 | LR: 0.000846
+[Train] [Epoch 167] Train Loss: 0.001673 | Test Loss: 0.001670 | Vel Loss: 0.000990 | Stress Loss: 0.000684 | LR: 0.000845
+[Train] [Epoch 168] Train Loss: 0.001670 | Test Loss: 0.001666 | Vel Loss: 0.000987 | Stress Loss: 0.000682 | LR: 0.000844
+[Train] [Epoch 169] Train Loss: 0.001666 | Test Loss: 0.001662 | Vel Loss: 0.000984 | Stress Loss: 0.000681 | LR: 0.000844
+[Train] [Epoch 170] Train Loss: 0.001662 | Test Loss: 0.001658 | Vel Loss: 0.000982 | Stress Loss: 0.000680 | LR: 0.000843
+[Train] [Epoch 171] Train Loss: 0.001658 | Test Loss: 0.001655 | Vel Loss: 0.000979 | Stress Loss: 0.000679 | LR: 0.000842
+[Train] [Epoch 172] Train Loss: 0.001655 | Test Loss: 0.001651 | Vel Loss: 0.000977 | Stress Loss: 0.000678 | LR: 0.000841
+[Train] [Epoch 173] Train Loss: 0.001651 | Test Loss: 0.001648 | Vel Loss: 0.000974 | Stress Loss: 0.000677 | LR: 0.000840
+[Train] [Epoch 174] Train Loss: 0.001648 | Test Loss: 0.001644 | Vel Loss: 0.000972 | Stress Loss: 0.000676 | LR: 0.000839
+[Train] [Epoch 175] Train Loss: 0.001644 | Test Loss: 0.001641 | Vel Loss: 0.000969 | Stress Loss: 0.000675 | LR: 0.000839
+[Train] [Epoch 176] Train Loss: 0.001641 | Test Loss: 0.001637 | Vel Loss: 0.000967 | Stress Loss: 0.000674 | LR: 0.000838
+[Train] [Epoch 177] Train Loss: 0.001637 | Test Loss: 0.001634 | Vel Loss: 0.000964 | Stress Loss: 0.000673 | LR: 0.000837
+[Train] [Epoch 178] Train Loss: 0.001634 | Test Loss: 0.001630 | Vel Loss: 0.000962 | Stress Loss: 0.000672 | LR: 0.000836
+[Train] [Epoch 179] Train Loss: 0.001630 | Test Loss: 0.001627 | Vel Loss: 0.000960 | Stress Loss: 0.000671 | LR: 0.000835
+[Train] [Epoch 180] Train Loss: 0.001627 | Test Loss: 0.001624 | Vel Loss: 0.000957 | Stress Loss: 0.000670 | LR: 0.000834
+[Train] [Epoch 181] Train Loss: 0.001624 | Test Loss: 0.001621 | Vel Loss: 0.000955 | Stress Loss: 0.000669 | LR: 0.000834

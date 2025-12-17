@@ -409,6 +409,7 @@ def load_all_trajectories(dataconfig):
     tfrecord_path = dataconfig['tfrecord_path']
     meta_path = dataconfig['meta_path']
     max_trajs = dataconfig['max_trajs']
+    print(f"max traj===={max_trajs} ")
 
     add_world_edges_dict = {'add_world_edges': dataconfig['add_world_edges'],
                             'radius_world_edge': dataconfig['radius_world_edge'],

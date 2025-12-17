@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/train.py", line 8, in <module>
+    from model_egnn.egnn_deforming_plate import EGNN_DefPlate
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_deforming_plate.py", line 3, in <module>
+    from .egnn_pytorch import EGNN_Network
+  File "/home/durante/EGNN/EGNN/EMA_EXPERIMENT/pytorch_model/model_egnn/egnn_pytorch.py", line 5, in <module>
+    from einops import rearrange, repeat
+ModuleNotFoundError: No module named 'einops'
