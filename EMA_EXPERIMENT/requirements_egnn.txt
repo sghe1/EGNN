@@ -1,0 +1,16 @@
+# Core dependencies for EGNN training
+torch>=2.0.0
+numpy>=1.21.0
+pyyaml>=6.0
+tqdm>=4.65.0
+matplotlib>=3.5.0
+einops>=0.6.0
+
+# Data loading
+tfrecord>=1.14.0
+
+# Optional: for visualization
+plotly>=5.0.0
+
+# Optional: for radius graph operations (used in kevin/radius.py)
+# torch-cluster>=1.6.0  # Uncomment if using radius graph features

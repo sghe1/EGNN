@@ -1,0 +1,31 @@
+# Baseline configuration for EGNN training
+# Copy this and modify for ablation studies
+
+# Model hyperparameters
+model:
+  activation_gnn: "ELU"
+  activation_mlps_final: "ELU"
+  hid_gnn_layer_dim: 128
+  hid_mlp_dim: 256
+  k_pool_ratios: [0.95, 0.95, 0.95]
+  dropout_gnn: 0.1
+  dropout_mlps_final: 0.1
+  adj_norm: "row"
+
+# Training parameters
+training:
+  lr: 0.001
+  epochs: 1000
+  batch_size: 4
+  shuffle: True
+  adam_weight_decay: 0.0001
+  num_train_trajs: 1
+  mode: null  # Standard mode (not overfit)
+  gamma_lr_scheduler: 0.999
+  random_seed: 42
+  overfit_traj_id: 0
+  overfit_time_idx: [0,1,2,3]
+  datapath: "processed_data/data_world=radius_mesh=True_norm=standard_At=False"
+  model_path_out: "model_out/baseline/"
+  amp: False
+  move_all_to_device: True
